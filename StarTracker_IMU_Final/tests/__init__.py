@@ -1,0 +1,1 @@
+"""StarTracker automated tests."""
