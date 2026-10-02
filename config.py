@@ -55,12 +55,12 @@ STEPS_PER_DEGREE = 1.0 / STEP_ANGLE
 # =========================================================
 
 # AZ 축
-MOTOR_BASE_STEP_PIN = 22
-MOTOR_BASE_DIR_PIN = 27
+MOTOR_BASE_STEP_PIN = 10 #22
+MOTOR_BASE_DIR_PIN = 9 #27
 
 # EL 축을 프로젝트에서는 ALT 축으로 사용
-MOTOR_MOUNT_STEP_PIN = 10
-MOTOR_MOUNT_DIR_PIN = 9
+MOTOR_MOUNT_STEP_PIN = 22#10
+MOTOR_MOUNT_DIR_PIN = 27 #9
 
 # 논리적으로 각도가 증가할 때 드라이버 DIR 핀에 출력할 값.
 # ALT 값은 IMU probe가 성공하면 런타임에 자동 갱신된다.
@@ -204,6 +204,19 @@ PLATE_ANALOGUE_GAIN = 4.0
 
 
 # =========================================================
+# Streaming (BLE + Web Camera Feed)
+# =========================================================
+
+# Flask 웹 서버 설정
+STREAMING_SERVER_HOST = "192.168.0.104"
+STREAMING_SERVER_PORT = 8000
+
+# 스트리밍 카메라 해상도 (preview용, 낮을수록 빠름)
+STREAMING_RESOLUTION = (1280, 720)
+STREAMING_JPEG_QUALITY = 80
+
+
+# =========================================================
 # Final Image Capture
 # =========================================================
 
@@ -251,3 +264,19 @@ GNSS_READ_TIMEOUT = 1.0
 
 # 유효한 위치 Fix 최대 대기 시간
 GNSS_FIX_TIMEOUT = 60.0
+
+
+# ==================================================
+# Compass & Stepper Motor Configuration
+# ==================================================
+COMPASS_I2C_BUS = 1
+COMPASS_I2C_ADDR = 0x0D
+MAGNETIC_DECLINATION = 8.0  # 한국 자기편각 (도)
+
+COMPASS_STEP_PIN = 23  # STEP 신호 핀
+COMPASS_DIR_PIN = 24  # DIR 신호 핀
+COMPASS_EN_PIN = 25  # ENABLE 핀
+
+MOTOR_STEPS_PER_REV = 400
+MICROSTEP = 32
+GEAR_RATIO = 54

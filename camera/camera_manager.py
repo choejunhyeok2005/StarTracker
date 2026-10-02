@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import cv2
+
 import config
 
 
@@ -33,6 +35,9 @@ class CameraManager:
 
         # 두 스레드가 카메라를 동시에 사용하는 것을 방지
         self._camera_lock = threading.Lock()
+
+        # 스트리밍 상태 플래그
+        self._streaming = False
 
     # ==================================================
     # Initialize
@@ -79,6 +84,88 @@ class CameraManager:
             self.initialized = True
 
             print("[Camera] Ready")
+
+    # ==================================================
+    # Streaming (MJPEG Web Feed)
+    # ==================================================
+
+    def start_streaming(self) -> None:
+        """Preview 설정으로 스트리밍을 시작한다."""
+
+        with self._camera_lock:
+
+            if self._streaming:
+                return
+
+            self._ensure_camera()
+
+            # 스트리밍용 preview 설정
+            stream_config = self.camera.create_preview_configuration(
+                main={
+                    "size": config.STREAMING_RESOLUTION,
+                    "format": config.CAMERA_FORMAT,
+                },
+            )
+
+            self.camera.configure(stream_config)
+            self.camera.start()
+
+            time.sleep(config.CAMERA_WARMUP_SECONDS)
+
+            self._streaming = True
+
+            print("[Camera] Streaming started")
+
+    def stop_streaming(self) -> None:
+        """스트리밍을 중지한다."""
+
+        with self._camera_lock:
+
+            if not self._streaming or self.camera is None:
+                return
+
+            try:
+                if self.camera.started:
+                    self.camera.stop()
+            except Exception as error:
+                print(f"[Camera] Streaming stop warning: {error}")
+
+            self._streaming = False
+
+            print("[Camera] Streaming stopped")
+
+    def generate_frames(self):
+        """Flask MJPEG 스트림용 제너레이터."""
+
+        if not self._streaming:
+            return
+
+        while self._streaming:
+            try:
+                with self._camera_lock:
+                    if self.camera is None or not self._streaming:
+                        break
+
+                    frame = self.camera.capture_array()
+
+                ret, buf = cv2.imencode(".jpg", frame, [
+                    cv2.IMWRITE_JPEG_QUALITY,
+                    config.STREAMING_JPEG_QUALITY
+                ])
+
+                if not ret:
+                    continue
+
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + buf.tobytes()
+                    + b"\r\n"
+                )
+
+            except Exception as error:
+                print(f"[Camera] Frame generation error: {error}")
+                break
 
     # ==================================================
     # Plate Solving Capture
@@ -276,3 +363,21 @@ class CameraManager:
                 "CameraManager is not initialized. "
                 "Call initialize() first."
             )
+
+    def _ensure_camera(self) -> None:
+        """카메라 객체가 없으면 생성한다."""
+
+        if self.camera is None:
+            if self._camera_factory is None:
+                try:
+                    from picamera2 import Picamera2
+                except ImportError as error:
+                    raise RuntimeError(
+                        "Picamera2 is required on the Raspberry Pi."
+                    ) from error
+
+                camera_factory = Picamera2
+            else:
+                camera_factory = self._camera_factory
+
+            self.camera = camera_factory()

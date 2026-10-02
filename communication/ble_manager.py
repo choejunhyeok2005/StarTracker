@@ -60,7 +60,7 @@ STEP_DELAY = {
     0: None,
     1: 0.003,
     2: 0.0015,
-    3: 0.0007,
+    3: 0.00007, #기존보다 10배 빨라짐
 }
 
 
@@ -296,31 +296,21 @@ class BLEManager:
     # =====================================================
 
     def _handle_click(self) -> None:
-        """현재 시스템 상태에 따라 추적을 시작하거나 중지한다."""
+        """
+        조이스틱 싱글클릭 감지 → 제어 완료 신호.
+        
+        PREVIEW 상태 (수동 제어 중)에서 클릭하면 BLE 연결 종료.
+        """
 
         current_state = self.tracking.state.get_state()
 
         if current_state == SystemState.PREVIEW:
 
-            # CODE_3의 BLE 변경사항: Plate Solving 시작 스레드가 이미
-            # 실행 중이면 같은 버튼 입력으로 중복 생성하지 않는다.
-            if self._tracking_starting:
-                print("[BLE] Tracking Start Already Running")
-                return
+            print("[BLE] Joystick Click → Manual Control Finished")
+            print("[BLE] Initiating Long Exposure...")
 
-            self._tracking_starting = True
-
-            print("[BLE] Joystick Click → Tracking Start")
-
-            # Plate Solving이 오래 걸릴 수 있으므로
-            # 버튼 스레드를 막지 않고 별도 스레드에서 실행
-            start_thread = threading.Thread(
-                target=self._start_tracking_worker,
-                name="BLETrackingStart",
-                daemon=True,
-            )
-
-            start_thread.start()
+            # stop_event 설정 → main.py의 ble_task() 종료
+            self._stop_event.set()
 
         elif current_state in (
             SystemState.TARGET_CAPTURE,
@@ -339,25 +329,6 @@ class BLEManager:
                 "[BLE] Click Ignored: "
                 f"Current State = {current_state.name}"
             )
-
-    def _start_tracking_worker(self) -> None:
-
-        try:
-
-            success = self.tracking.start_tracking()
-
-            if not success:
-                print("[BLE] Tracking Start Failed")
-
-        except Exception as error:
-
-            print(
-                f"[BLE] Tracking Start Error: {error}"
-            )
-
-        finally:
-            # 실패하거나 예외가 발생해도 다음 시작 입력을 받을 수 있다.
-            self._tracking_starting = False
 
     # =====================================================
     # Start Manual Threads
