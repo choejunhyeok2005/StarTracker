@@ -8,7 +8,8 @@ from typing import Deque, Optional
 
 try:
     from RPLCD.i2c import CharLCD
-except ImportError:  # pragma: no cover
+except ImportError as e:  # pragma: no cover
+    print(f"[LCD] RPLCD import failed: {e}", file=sys.stderr)
     CharLCD = None
 
 
@@ -54,6 +55,7 @@ class LCDManager:
 
     def initialize(self) -> None:
         if CharLCD is None:
+            print("[LCD] CharLCD not available - LCD disabled", file=sys.stderr)
             self._enabled = False
             return
 
@@ -62,7 +64,9 @@ class LCDManager:
             self._enabled = True
             self.clear()
             self.set_backlight(self._backlight_enabled)
-        except Exception:  # pragma: no cover
+            print("[LCD] Successfully initialized", file=sys.stderr)
+        except Exception as e:  # pragma: no cover
+            print(f"[LCD] Initialization failed: {e}", file=sys.stderr)
             self._enabled = False
 
     def is_enabled(self) -> bool:
@@ -157,6 +161,8 @@ class LCDManager:
         `cols` is split into chunks of `cols` and enqueued in order.
         """
         if not self._enabled:
+            if text.strip():  # Only log non-empty text
+                print(f"[LCD] LCD disabled, skipping: {text[:50]}", file=sys.stderr)
             return
 
         raw = (self._current_line or "") + text
@@ -228,8 +234,8 @@ class LCDManager:
                 line = page[r] if r < len(page) else ""
                 self._lcd.cursor_pos = (r, 0)
                 self._lcd.write_string(line.ljust(self.cols)[: self.cols])
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[LCD] Display error: {e}", file=sys.stderr)
 
     def _rotation_worker(self) -> None:
         while not self._worker_stop.is_set():

@@ -25,7 +25,7 @@ class CompassManager:
         self.dir_pin = config.COMPASS_DIR_PIN
         self.en_pin = config.COMPASS_EN_PIN
 
-        self.output_steps_per_rev = (
+        self.output_steps_per_rev = int(
             config.MOTOR_STEPS_PER_REV * config.MICROSTEP * config.GEAR_RATIO
         )
 
@@ -60,6 +60,8 @@ class CompassManager:
         """모터 발열 방지를 위한 Disable 처리"""
         try:
             GPIO.output(self.en_pin, GPIO.HIGH)
+            GPIO.output(self.step_pin, GPIO.LOW)
+            GPIO.output(self.dir_pin, GPIO.LOW)
         except Exception:
             pass
 
@@ -114,46 +116,48 @@ class CompassManager:
         x_min = y_min = 99999
         x_max = y_max = -99999
 
-        steps_per_sample = self.output_steps_per_rev // sample_divisions
-
-        print("\n[Compass] Starting Motor Calibration...")
-
-        for i in range(sample_divisions):
-            await asyncio.to_thread(
-                self._rotate_motor_steps, steps_per_sample
-            )
-            await asyncio.sleep(0.05)
-
-            xyz = self._read_xyz()
-            if xyz:
-                x, y, _ = xyz
-                x_min, x_max = min(x_min, x), max(x_max, x)
-                y_min, y_max = min(y_min, y), max(y_max, y)
-
-                print(
-                    f"[Compass] Calibrating {i+1:2d}/{sample_divisions} | "
-                    f"X:[{x_min}, {x_max}] Y:[{y_min}, {y_max}]"
-                )
-
-        print("\n[Compass] Calibration Scan Complete.")
-
-        if x_max == x_min or y_max == y_min:
-            print("[Compass] Calibration Error: Insufficient sensor variation.")
-            return False
-
-        self.x_offset = (x_max + x_min) / 2
-        self.y_offset = (y_max + y_min) / 2
-        self.x_scale = (x_max - x_min) / 2
-        self.y_scale = (y_max - y_min) / 2
-        self.is_calibrated = True
-
-        print(
-            f"[Compass] Calibration Parameters: Offset({self.x_offset:.1f}, {self.y_offset:.1f}), "
-            f"Scale({self.x_scale:.1f}, {self.y_scale:.1f})"
+        steps_per_sample = max(
+            1, int(self.output_steps_per_rev // sample_divisions)
         )
 
-        self.disable_motor()
-        return True
+        print("\n[Compass] Starting Motor Calibration...")
+        try:
+            for i in range(sample_divisions):
+                await asyncio.to_thread(
+                    self._rotate_motor_steps, steps_per_sample
+                )
+                await asyncio.sleep(0.05)
+
+                xyz = self._read_xyz()
+                if xyz:
+                    x, y, _ = xyz
+                    x_min, x_max = min(x_min, x), max(x_max, x)
+                    y_min, y_max = min(y_min, y), max(y_max, y)
+
+                    print(
+                        f"[Compass] Calibrating {i+1:2d}/{sample_divisions} | "
+                        f"X:[{x_min}, {x_max}] Y:[{y_min}, {y_max}]"
+                    )
+
+            print("\n[Compass] Calibration Scan Complete.")
+
+            if x_max == x_min or y_max == y_min:
+                print("[Compass] Calibration Error: Insufficient sensor variation.")
+                return False
+
+            self.x_offset = (x_max + x_min) / 2
+            self.y_offset = (y_max + y_min) / 2
+            self.x_scale = (x_max - x_min) / 2
+            self.y_scale = (y_max - y_min) / 2
+            self.is_calibrated = True
+
+            print(
+                f"[Compass] Calibration Parameters: Offset({self.x_offset:.1f}, {self.y_offset:.1f}), "
+                f"Scale({self.x_scale:.1f}, {self.y_scale:.1f})"
+            )
+            return True
+        finally:
+            self.disable_motor()
 
     def get_heading(self) -> float | None:
         """보정된 진북 방위각 반환 (0~360°)"""
@@ -180,8 +184,4 @@ class CompassManager:
     def shutdown(self) -> None:
         """종료 시 전원 해제"""
         self.disable_motor()
-        try:
-            GPIO.cleanup()
-        except Exception:
-            pass
         print("[Compass] Hardware Shutdown Complete.")

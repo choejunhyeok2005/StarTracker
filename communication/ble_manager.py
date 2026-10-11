@@ -70,6 +70,7 @@ class BLEManager:
     def __init__(self, tracking):
 
         self.tracking = tracking
+        self.on_start = None
 
         self.client: Optional[BleakClient] = None
 
@@ -297,20 +298,17 @@ class BLEManager:
 
     def _handle_click(self) -> None:
         """
-        조이스틱 싱글클릭 감지 → 제어 완료 신호.
-        
-        PREVIEW 상태 (수동 제어 중)에서 클릭하면 BLE 연결 종료.
+        MANUAL 클릭은 세션 시작 요청, 자동 세션 중 클릭은 중지 요청.
+        BLE 제어 스레드는 프로그램 종료 또는 연결 해제 때만 종료한다.
         """
 
         current_state = self.tracking.state.get_state()
 
         if current_state == SystemState.PREVIEW:
 
-            print("[BLE] Joystick Click → Manual Control Finished")
-            print("[BLE] Initiating Long Exposure...")
-
-            # stop_event 설정 → main.py의 ble_task() 종료
-            self._stop_event.set()
+            if self.on_start is not None:
+                print("[BLE] Joystick Click → Tracking Start Requested")
+                self.on_start()
 
         elif current_state in (
             SystemState.TARGET_CAPTURE,

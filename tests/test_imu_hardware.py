@@ -59,10 +59,10 @@ class IMUMathTests(unittest.TestCase):
             places=7,
         )
 
-    def test_positive_x_tilts_pitch_negative(self):
+    def test_positive_y_tilts_pitch_positive(self):
         self.assertAlmostEqual(
-            acceleration_to_pitch(16384, 0, 16384),
-            -45.0,
+            acceleration_to_pitch(0, 16384, 16384),
+            45.0,
             places=7,
         )
 
@@ -114,13 +114,13 @@ class MPU6050PairTests(unittest.TestCase):
             {
                 0x68: [
                     encode_acceleration(0, 0, 16384),
-                    encode_acceleration(-16384, 0, 16384),
+                    encode_acceleration(0, -16384, 16384),
                     encode_acceleration(0, 0, 16384),
                 ],
                 0x69: [
-                    encode_acceleration(16384, 0, 16384),
+                    encode_acceleration(0, 16384, 16384),
                     encode_acceleration(0, 0, 16384),
-                    encode_acceleration(16384, 0, 16384),
+                    encode_acceleration(0, 16384, 16384),
                 ],
             }
         )
@@ -138,7 +138,7 @@ class MPU6050PairTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(base_pitch, 0.0, places=7)
-        self.assertAlmostEqual(upper_pitch, -45.0, places=7)
+        self.assertAlmostEqual(upper_pitch, 45.0, places=7)
         block_reads = [entry for entry in bus.reads if entry[0] == "block"]
         self.assertEqual(len(block_reads), 6)
         self.assertTrue(all(entry[2:] == (0x3B, 6) for entry in block_reads))

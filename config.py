@@ -29,12 +29,12 @@ MOTOR_FULL_STEPS_PER_REVOLUTION = 400
 MICROSTEP = 32
 
 # 최종 기계 감속비
-GEAR_RATIO = 27.0
+GEAR_RATIO = 27
 
 # 모터 마이크로스텝 1회당 최종 출력축 이동 각도
 #
-# 0.9 / 32 / 27
-# = 약 0.00104167°
+# 0.9 / 32 / 24
+# = 약 0.01125°
 STEP_ANGLE = (
     MOTOR_FULL_STEP_ANGLE
     / MICROSTEP
@@ -75,8 +75,8 @@ MOTOR_ALT_POSITIVE_DIRECTION = True
 # 현재 실제 작동 테스트에서는 STEP/DIR만 사용했으므로
 # 연결이 확인되기 전까지 None으로 유지한다.
 MOTOR_ENABLE_PIN = None
-MOTOR_MS1_PIN = None
-MOTOR_MS2_PIN = None
+MOTOR_MS1_PIN = 1
+MOTOR_MS2_PIN = 0
 
 MOTOR_ENABLE_ACTIVE_LOW = True
 
@@ -111,6 +111,12 @@ ANGLE_TOLERANCE = 0.03
 # ALT 출력축 안전 범위
 MIN_ALTITUDE = 0.0
 MAX_ALTITUDE = 90.0
+
+# 수동 조작은 IMU 정렬 위치(ALT 0°) 아래로도 움직일 수 있다.
+# 실제 리미트 스위치가 없으므로 필요할 때만 별도 소프트 제한을 켠다.
+MANUAL_ALT_SOFT_LIMITS_ENABLED = False
+MANUAL_MIN_ALTITUDE = -30.0
+MANUAL_MAX_ALTITUDE = 90.0
 
 
 # =========================================================
@@ -147,7 +153,7 @@ IMU_SETTLE_SECONDS = 0.25
 
 IMU_ALIGNMENT_TIMEOUT_SECONDS = 60.0
 IMU_MAX_ALIGNMENT_ITERATIONS = 80
-IMU_MAX_RELATIVE_TRAVEL_DEG = 15.0
+IMU_MAX_RELATIVE_TRAVEL_DEG = 30.0 
 IMU_MAX_WORSENING_COUNT = 3
 IMU_WORSENING_MARGIN_DEG = 0.1
 
@@ -176,6 +182,10 @@ MAX_CONSECUTIVE_CORRECTION_FAILURES = 3
 
 # 세션마다 Tracking Log와 Plate Solving 결과 JSON을 저장한다.
 TRACKING_LOG_DIRECTORY = "data/logs"
+
+# 프로그램의 stdout/stderr 전체를 터미널과 파일에 동시에 저장한다.
+CONSOLE_LOG_ENABLED = True
+CONSOLE_LOG_DIRECTORY = "data/logs"
 
 
 # =========================================================
@@ -232,6 +242,22 @@ FINAL_SEQUENCE_DIRECTORY = "data/images/final_sequence"
 FINAL_SUBEXPOSURE_SECONDS = 10.0
 FINAL_FRAME_COUNT = 18
 
+# Start long exposures immediately after the initial target solve.
+PIPELINED_CAPTURE_ENABLED = True
+PIPELINED_EXPOSURE_SECONDS = 110.0
+PIPELINED_FRAME_COUNT = 17
+# True: the last exposure has no solve/correction running alongside it.
+PIPELINED_SKIP_FINAL_CORRECTION = True
+EXIT_AFTER_CAPTURE = True
+
+# 각 장노출 프레임이 저장된 뒤 다음 프레임을 시작하기 전 대기시간.
+# 0이면 불필요한 공백 없이 바로 다음 프레임을 촬영한다.
+FINAL_FRAME_INTERVAL_SECONDS = 0.0
+
+# 장노출 시퀀스 중 이 프레임 수마다 plate solving drift 보정을 실행한다.
+# 0이면 장노출 중 추가 drift correction을 하지 않는다.
+FINAL_DRIFT_CORRECTION_EVERY_FRAMES = 3
+
 
 # =========================================================
 # Astrometry.net Plate Solving
@@ -263,7 +289,18 @@ GNSS_BAUDRATE = 9600
 GNSS_READ_TIMEOUT = 1.0
 
 # 유효한 위치 Fix 최대 대기 시간
-GNSS_FIX_TIMEOUT = 60.0
+GNSS_FIX_TIMEOUT = 300.0
+
+# 위치 Fix 취득 후 GNSS UTC를 추가로 기다리는 시간
+GNSS_UTC_TIMEOUT = 5.0
+
+# GNSS 성공으로 인정할 최소 위성 수
+GNSS_MIN_SATELLITES = 1
+
+# GNSS Fix를 얻지 못했을 때 사용할 관측 위치
+GNSS_FALLBACK_LATITUDE = 37.5
+GNSS_FALLBACK_LONGITUDE = 127.0
+GNSS_FALLBACK_ALTITUDE = 0.0
 
 
 # ==================================================
@@ -273,10 +310,11 @@ COMPASS_I2C_BUS = 1
 COMPASS_I2C_ADDR = 0x0D
 MAGNETIC_DECLINATION = 8.0  # 한국 자기편각 (도)
 
-COMPASS_STEP_PIN = 23  # STEP 신호 핀
-COMPASS_DIR_PIN = 24  # DIR 신호 핀
+COMPASS_STEP_PIN = 10  # STEP 신호 핀
+COMPASS_DIR_PIN = 9  # DIR 신호 핀
 COMPASS_EN_PIN = 25  # ENABLE 핀
+COMPASS_CALIBRATION_ENABLED = True
 
 MOTOR_STEPS_PER_REV = 400
 MICROSTEP = 32
-GEAR_RATIO = 54
+GEAR_RATIO = 27.0

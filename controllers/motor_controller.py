@@ -124,20 +124,28 @@ class MotorController:
         # 조이스틱 대각선 입력 시 두 축이 동시에 움직일 수 있다.
         with axis_lock:
 
+            manual_alt_limits_enabled = bool(
+                getattr(
+                    config,
+                    "MANUAL_ALT_SOFT_LIMITS_ENABLED",
+                    True,
+                )
+            )
+
             # 소프트웨어 위치만 제한하면 실제 축은 0/90도 경계를 넘어
             # 계속 움직일 수 있다. 따라서 모터를 구동하기 전에 남은
             # 이동 범위로 스텝 수를 제한한다.
-            if axis == "ALT":
+            if axis == "ALT" and manual_alt_limits_enabled:
 
                 if direction:
                     remaining_angle = (
-                        config.MAX_ALTITUDE
+                        config.MANUAL_MAX_ALTITUDE
                         - self.current_alt
                     )
                 else:
                     remaining_angle = (
                         self.current_alt
-                        - config.MIN_ALTITUDE
+                        - config.MANUAL_MIN_ALTITUDE
                     )
 
                 allowed_steps = int(
@@ -173,10 +181,13 @@ class MotorController:
                 else:
                     self.current_alt -= moved_angle
 
-                self.current_alt = (
-                    self._clamp_altitude(
-                        self.current_alt
-                    )
+                if manual_alt_limits_enabled:
+                    self.current_alt = max(
+                        config.MANUAL_MIN_ALTITUDE,
+                        min(
+                            config.MANUAL_MAX_ALTITUDE,
+                            self.current_alt,
+                        ),
                     )
             
 
@@ -325,6 +336,12 @@ class MotorController:
     # Tracking Update
     # =====================================================
 
+    def apply_position_offset(self, alt_offset: float, az_offset: float):
+        """Apply measured pointing error without losing subsequent tracking steps."""
+        with self._motor_lock:
+            self.current_alt = self._clamp_altitude(self.current_alt + alt_offset)
+            self.current_az = self._normalize_azimuth(self.current_az + az_offset)
+
     def update(self):
 
         if self.mode != MotorMode.TRACKING:
@@ -460,9 +477,20 @@ class MotorController:
     # Stop
     # =====================================================
 
+    def resume(self):
+        resume_driver = getattr(self.driver, "resume", None)
+        if resume_driver is not None:
+            resume_driver()
+
+        self.mode = MotorMode.STOP
+
     def stop(self):
 
         self.mode = MotorMode.STOP
+
+        stop_driver = getattr(self.driver, "stop", None)
+        if stop_driver is not None:
+            stop_driver()
 
     # =====================================================
     # Angle / Step Conversion

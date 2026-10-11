@@ -14,8 +14,10 @@ StarTracker Tracking Manager
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Optional
 
 import config
@@ -100,6 +102,8 @@ class TrackingManager:
 
         # 추적 상태
         self.is_tracking = False
+        self.capture_completed = False
+        self.manual_enabled = True
         self.correction_count = 0
         self.consecutive_correction_failures = 0
 
@@ -228,7 +232,7 @@ class TrackingManager:
     ) -> None:
         """PREVIEW 상태에서 조이스틱 수동 이동을 처리한다."""
 
-        if not self.state.is_state(SystemState.PREVIEW):
+        if not self.manual_enabled or not self.state.is_state(SystemState.PREVIEW):
             return
 
         self.motor.move_manual(
@@ -246,13 +250,21 @@ class TrackingManager:
         """Plate Solving용 사진을 촬영하고 결과를 반환한다."""
 
         try:
-            image_path = self.camera.capture_plate()
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+            filename = str(Path(config.PLATE_IMAGE_PATH).with_name(f"plate_{stamp}.jpg"))
+            capture_started = self._current_time_iso()
+            image_path = self.camera.capture_plate(filename=filename)
+            capture_finished = self._current_time_iso()
             result = self.platesolver.solve(image_path)
 
             if result is None:
                 print("[Tracking] Plate Solving returned no result.")
                 return None
 
+            result = dict(result)
+            result.update(image_path=image_path, capture_started_utc=capture_started,
+                          capture_finished_utc=capture_finished,
+                          solve_finished_utc=self._current_time_iso())
             return result
 
         except Exception as error:
@@ -344,6 +356,8 @@ class TrackingManager:
                 return False
 
             self.correction_count = 0
+            self.capture_completed = False
+            self.stop_reason = "session_ended"
             self.consecutive_correction_failures = 0
             self.stop_event.clear()
             self.is_tracking = True
@@ -367,7 +381,9 @@ class TrackingManager:
         if self.alignment_result is not None:
             self._safe_log(
                 self.logger.record_alignment,
-                asdict(self.alignment_result),
+                {**asdict(self.alignment_result),
+                 "base_pitch_offset_deg": config.IMU_BASE_PITCH_OFFSET_DEG,
+                 "upper_pitch_offset_deg": config.IMU_UPPER_PITCH_OFFSET_DEG},
             )
 
         self._safe_log(
@@ -384,7 +400,8 @@ class TrackingManager:
         )
 
         self.correction_thread = threading.Thread(
-            target=self.correction_loop,
+            target=(self.pipelined_capture_loop
+                    if config.PIPELINED_CAPTURE_ENABLED else self.correction_loop),
             name="CorrectionLoop",
             daemon=True,
         )
@@ -406,6 +423,7 @@ class TrackingManager:
         MotorController에 전달한다.
         """
 
+        next_tick = time.monotonic()
         while not self.stop_event.is_set():
 
             try:
@@ -442,20 +460,147 @@ class TrackingManager:
                     timestamp_utc=self._current_time_iso(),
                     details={"error": str(error)},
                 )
-                self._safe_log(
-                    self.logger.finish_session,
-                    status="tracking_error",
-                    ended_at_utc=self._current_time_iso(),
-                )
+                if not config.PIPELINED_CAPTURE_ENABLED:
+                    self._safe_log(
+                        self.logger.finish_session,
+                        status="tracking_error",
+                        ended_at_utc=self._current_time_iso(),
+                    )
                 break
 
-            self.stop_event.wait(config.TRACKING_INTERVAL)
+            next_tick += config.TRACKING_INTERVAL
+            now = time.monotonic()
+            if next_tick < now:
+                next_tick = now + config.TRACKING_INTERVAL
+            self.stop_event.wait(max(0.0, next_tick - now))
 
         print("[Tracking] Tracking Loop Ended")
 
     # ==================================================
     # Correction Loop
     # ==================================================
+
+    def _solve_exposure(self, frame):
+        """Solve a saved exposure while the camera captures the next one."""
+        path, observation_time, frame_number = frame
+        try:
+            result = self.platesolver.solve(path)
+            if self.stop_event.is_set():
+                return
+            if result is None:
+                self._record_correction_failure()
+                return
+            measured_alt, measured_az = self.astronomy.radec_to_altaz(
+                ra=float(result["ra"]), dec=float(result["dec"]),
+                observation_time=observation_time,
+            )
+            target_alt, target_az = self.astronomy.radec_to_altaz(
+                ra=self.target_ra, dec=self.target_dec,
+                observation_time=observation_time,
+            )
+            alt_error = target_alt - measured_alt
+            az_error = self._shortest_azimuth_error(target_az, measured_az)
+            # The saved frame describes an earlier time. Apply its error to
+            # the live position rather than resetting it to that old position.
+            with self._state_lock:
+                if self.stop_event.is_set():
+                    return
+                self.motor.apply_position_offset(-alt_error, -az_error)
+                self.correction_count += 1
+                self.consecutive_correction_failures = 0
+            self._safe_log(
+                self.logger.record_plate_solution, stage="exposure_correction",
+                result={**result, "image_path": path},
+                timestamp_utc=self._time_to_iso(observation_time),
+                correction_number=self.correction_count,
+            )
+            self._safe_log(self.logger.record_correction, {
+                "after_frame": frame_number, "image_path": path,
+                "altitude_error": alt_error, "azimuth_error": az_error,
+                "correction_number": self.correction_count,
+            })
+            print(f"[Tracking] Exposure {frame_number} corrected: "
+                  f"ALT={alt_error:.4f}, AZ={az_error:.4f} deg")
+        except Exception as error:
+            self._safe_log(
+                self.logger.record_event, name="exposure_correction_error",
+                timestamp_utc=self._current_time_iso(),
+                details={"image_path": path, "error": str(error)},
+            )
+            self._record_correction_failure()
+
+    def pipelined_capture_loop(self):
+        """Capture continuously; solve the previous frame in one worker."""
+        paths = []
+        status = "completed"
+        future = None
+        previous_frame = None
+        worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ExposureSolve")
+        try:
+            count = int(config.PIPELINED_FRAME_COUNT)
+            exposure = float(config.PIPELINED_EXPOSURE_SECONDS)
+            if count < 1 or exposure <= 0:
+                raise ValueError("Exposure time and frame count must be positive.")
+            directory = Path(config.FINAL_SEQUENCE_DIRECTORY)
+            directory.mkdir(parents=True, exist_ok=True)
+            sequence_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+            self.state.set_state(SystemState.CAPTURE)
+            for number in range(1, count + 1):
+                if self.stop_event.is_set():
+                    break
+                # Do not queue stale frames if solving takes longer than an
+                # exposure. The next available slot uses the latest frame.
+                if number == count and config.PIPELINED_SKIP_FINAL_CORRECTION:
+                    if future is not None:
+                        future.result()
+                    if self.stop_event.is_set():
+                        break
+                elif previous_frame is not None and (future is None or future.done()):
+                    if future is not None:
+                        future.result()
+                    future = worker.submit(self._solve_exposure, previous_frame)
+                started = self._get_observation_time()
+                path = self.camera.capture_long_exposure(
+                    filename=str(directory / f"final_{sequence_id}_{number:03d}.jpg"),
+                    exposure_time=exposure,
+                )
+                paths.append(path)
+                ended = self._get_observation_time()
+                metadata = getattr(self.camera, "last_exposure_metadata", None) or {}
+                midpoint = started + (ended - started) / 2
+                midpoint_age = getattr(self.camera, "last_exposure_midpoint_age_seconds", None)
+                if midpoint_age is not None:
+                    midpoint = ended - midpoint_age / 86400.0
+                previous_frame = (path, midpoint, number)
+                self._safe_log(
+                    self.logger.record_event, name="exposure_saved",
+                    timestamp_utc=self._time_to_iso(midpoint),
+                    details={"frame_number": number, "image_path": path,
+                             "requested_exposure_seconds": exposure,
+                             "metadata": metadata},
+                )
+                print(f"[Camera] Exposure saved: {number}/{count}: {path}")
+            if future is not None:
+                future.result()
+            if self.stop_event.is_set():
+                status = "capture_cancelled"
+            else:
+                self.capture_completed = True
+                self.stop_reason = "completed"
+        except Exception as error:
+            status = "final_capture_failed"
+            print(f"[Camera] Exposure sequence failed: {error}")
+            self._safe_log(self.logger.record_event, name="final_capture_error",
+                           timestamp_utc=self._current_time_iso(),
+                           details={"error": str(error), "saved_frames": len(paths)})
+        finally:
+            self.stop_event.set()
+            self.is_tracking = False
+            self.motor.stop()
+            worker.shutdown(wait=True, cancel_futures=True)
+            self._safe_log(self.logger.finish_session, status=status,
+                           ended_at_utc=self._current_time_iso(), final_images=paths)
+            self.state.set_state(SystemState.PREVIEW)
 
     def correction_loop(self) -> None:
         """설정된 주기마다 Plate Solving으로 실제 방향을 측정한다."""
@@ -687,6 +832,7 @@ class TrackingManager:
         """사용자가 버튼을 눌러 추적을 중지하고 PREVIEW로 복귀한다."""
 
         stopped_active_tracking = False
+        self.stop_reason = reason
 
         with self._state_lock:
 
@@ -707,17 +853,79 @@ class TrackingManager:
             stopped_active_tracking = True
 
         if stopped_active_tracking:
-            self._safe_log(
-                self.logger.finish_session,
-                status=reason,
-                ended_at_utc=self._current_time_iso(),
-            )
-
+            # SessionController finalizes after camera/correction workers exit.
             print(f"[Tracking] Stopped: {reason}")
 
     # ==================================================
     # Automatic Finish Sequence
     # ==================================================
+
+    def _correct_drift_during_final_capture(
+        self,
+        frame_number: int,
+        _image_path: str,
+    ) -> None:
+        """Run plate-solving feedback between configured subframes."""
+
+        every_frames = int(
+            config.FINAL_DRIFT_CORRECTION_EVERY_FRAMES
+        )
+
+        if (
+            every_frames <= 0
+            or frame_number % every_frames != 0
+            or self.stop_event.is_set()
+        ):
+            return
+
+        print(
+            "[Tracking] Final capture drift correction after frame "
+            f"{frame_number}"
+        )
+
+        result = self.capture_and_solve()
+        timestamp_utc = self._current_time_iso()
+
+        if result is None:
+            self._safe_log(
+                self.logger.record_event,
+                name="final_capture_correction_skipped",
+                timestamp_utc=timestamp_utc,
+                details={"after_frame": frame_number},
+            )
+            return
+
+        self._safe_log(
+            self.logger.record_plate_solution,
+            stage="final_capture_drift_correction",
+            result=result,
+            timestamp_utc=timestamp_utc,
+        )
+
+        try:
+            correction = self.drift_correction(result)
+        except Exception as error:
+            print(
+                "[Tracking] Final capture drift correction failed: "
+                f"{error}"
+            )
+            self._safe_log(
+                self.logger.record_event,
+                name="final_capture_correction_error",
+                timestamp_utc=timestamp_utc,
+                details={
+                    "after_frame": frame_number,
+                    "error": str(error),
+                },
+            )
+            return
+
+        correction["stage"] = "final_capture"
+        correction["after_frame"] = frame_number
+        self._safe_log(
+            self.logger.record_correction,
+            correction,
+        )
 
     def finish_sequence(self) -> None:
         """
@@ -752,6 +960,12 @@ class TrackingManager:
                     directory=config.FINAL_SEQUENCE_DIRECTORY,
                     frame_count=config.FINAL_FRAME_COUNT,
                     exposure_time=config.FINAL_SUBEXPOSURE_SECONDS,
+                    frame_interval_seconds=(
+                        config.FINAL_FRAME_INTERVAL_SECONDS
+                    ),
+                    after_frame=(
+                        self._correct_drift_during_final_capture
+                    ),
                     cancel_event=self.stop_event,
                 )
 
@@ -894,7 +1108,7 @@ class TrackingManager:
 
     def set_time_provider(
         self,
-        provider: Callable,
+        provider: Optional[Callable],
     ) -> None:
         """
         GNSS UTC를 반환하는 함수를 등록한다.
@@ -943,9 +1157,11 @@ class TrackingManager:
             return datetime.now(timezone.utc).isoformat()
 
     def _current_time_iso(self) -> str:
-        return self._time_to_iso(
-            self._get_observation_time()
-        )
+        try:
+            return self._time_to_iso(self._get_observation_time())
+        except Exception:
+            # Diagnostic timestamp only; never used for motor coordinates.
+            return datetime.now(timezone.utc).isoformat()
 
     @staticmethod
     def _safe_log(operation, *args, **kwargs):

@@ -29,9 +29,9 @@ def signed_int16(high: int, low: int) -> int:
 
 
 def acceleration_to_pitch(
-    x: int, y: int, z: int, *, permissive: bool = True
+    x: int, y: int, z: int, *, permissive: bool = False
 ) -> float:
-    """설정된 센서 축 방향에 대한 피치(도 단위) 반환"""
+    """Y-Z 평면 기준 피치 각도(도 단위)를 반환합니다."""
     values = (float(x), float(y), float(z))
 
     if not all(math.isfinite(value) for value in values):
@@ -45,7 +45,7 @@ def acceleration_to_pitch(
         raise IMUReadError("가속도계 샘플이 올 zero 벡터입니다.")
 
     pitch = math.degrees(
-        math.atan2(-values[0], math.hypot(values[1], values[2]))
+        math.atan2(values[1], values[2])
     )
 
     if not math.isfinite(pitch):
@@ -74,7 +74,7 @@ class MPU6050Pair:
         base_offset: float = 0.0,
         upper_offset: float = 0.0,
         max_delta: float = 5.0,  # 두 센서 간 허용 오차 범위(도 단위)
-        permissive: bool = True,
+        permissive: bool = False,
         max_retries: int = 3,
         bus_factory: Callable[[int], Any] | None = None,
         sleep: Callable[[float], None] = time.sleep,
@@ -131,6 +131,7 @@ class MPU6050Pair:
                 identity = int(
                     self._bus.read_byte_data(address, self.WHO_AM_I)
                 )
+                print(f"[IMU] I2C address=0x{address:02X} WHO_AM_I=0x{identity:02X}")
 
                 if not self.permissive and (identity & 0x7E not in (0x68, 0x70)):
                     raise IMUInitializationError(
@@ -158,6 +159,15 @@ class MPU6050Pair:
 
     def read_pitch(self, address: int) -> float:
         """I2C 재시도 로직을 포함하여 피치 각도를 읽어옵니다."""
+        x, y, z = self.read_acceleration(address)
+        raw_pitch = acceleration_to_pitch(
+            x, y, z, permissive=self.permissive
+        )
+        offset = self.base_offset if address == self.base_address else self.upper_offset
+        return raw_pitch - offset
+
+    def read_acceleration(self, address: int) -> tuple[int, int, int]:
+        """지정한 IMU의 원시 가속도 X/Y/Z를 반환합니다."""
         if not self.initialized or self._bus is None:
             if not self.permissive:
                 raise IMUReadError("MPU6050Pair가 초기화되지 않았습니다.")
@@ -182,7 +192,7 @@ class MPU6050Pair:
 
         if data is None or len(data) != 6:
             if self.permissive:
-                return 0.0
+                return 0, 0, 0
             raise IMUReadError(
                 f"0x{address:02X} 주소 읽기 실패: {last_error}"
             )
@@ -190,10 +200,7 @@ class MPU6050Pair:
         x = signed_int16(data[0], data[1])
         y = signed_int16(data[2], data[3])
         z = signed_int16(data[4], data[5])
-
-        raw_pitch = acceleration_to_pitch(x, y, z, permissive=self.permissive)
-        offset = self.base_offset if address == self.base_address else self.upper_offset
-        return raw_pitch - offset
+        return x, y, z
 
     def verify_pitch_difference(
         self, base_pitch: float, upper_pitch: float, max_delta: float | None = None
@@ -222,8 +229,27 @@ class MPU6050Pair:
         upper_samples = []
 
         for index in range(sample_count):
-            base_samples.append(self.read_pitch(self.base_address))
-            upper_samples.append(self.read_pitch(self.upper_address))
+            base_xyz = self.read_acceleration(self.base_address)
+            upper_xyz = self.read_acceleration(self.upper_address)
+
+            print(
+                "[IMU RAW] "
+                f"BASE X={base_xyz[0]:6d} Y={base_xyz[1]:6d} Z={base_xyz[2]:6d} | "
+                f"UPPER X={upper_xyz[0]:6d} Y={upper_xyz[1]:6d} Z={upper_xyz[2]:6d}"
+            )
+
+            base_samples.append(
+                acceleration_to_pitch(
+                    *base_xyz,
+                    permissive=self.permissive,
+                ) - self.base_offset
+            )
+            upper_samples.append(
+                acceleration_to_pitch(
+                    *upper_xyz,
+                    permissive=self.permissive,
+                ) - self.upper_offset
+            )
 
             if index + 1 < sample_count and sample_interval:
                 self._sleep(sample_interval)

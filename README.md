@@ -1,5 +1,10 @@
 # StarTracker IMU Final
 
+현재 기본 촬영 흐름은 [PIPELINED_CAPTURE.md](PIPELINED_CAPTURE.md)를 참고하세요.
+최초 목표 plate solving 후 즉시 연속 장노출을 시작하고, 이전 완료 사진으로
+다음 촬영 중 병렬 보정합니다. 아래의 보정 15회 후 18장 촬영 흐름은
+`PIPELINED_CAPTURE_ENABLED=False`인 기존 모드 설명입니다.
+
 Raspberry Pi 5, HQ Camera, GNSS, BLE 조이스틱, ALT/AZ 스테퍼 모터와 두 개의
 MPU6050을 사용하는 최종 제어 코드입니다. 전원을 켜면 고정 베이스와 움직이는
 상단판의 pitch를 먼저 맞추고, 성공한 경우에만 카메라·BLE·천체 추적 단계로
@@ -90,10 +95,11 @@ python -m unittest discover -s tests -v
     저장합니다.
 13. 20 Hz tracking loop에서 현재 GNSS UTC의 목표 Alt/Az를 계산하고 두 모터를
     구동합니다.
-14. 120초마다 새 사진을 plate solving하여 실제 카메라 방향으로 소프트웨어
+14. `CORRECTION_INTERVAL`마다 새 사진을 plate solving하여 실제 카메라 방향으로 소프트웨어
     위치를 동기화합니다. 연속 실패 3회면 세션을 종료합니다.
-15. 성공한 보정 15회를 완료하면 tracking을 유지한 채 10초 프레임 18장을
-    촬영합니다.
+15. 성공한 보정이 `MAX_CORRECTION_COUNT`에 도달하면 tracking을 유지한 채
+    설정된 시간·간격·횟수로 장노출 프레임을 촬영합니다. 촬영 중에도
+    `FINAL_DRIFT_CORRECTION_EVERY_FRAMES`장마다 plate solving 보정을 수행합니다.
 16. 이미지 경로, IMU 보정값, plate solving 결과와 drift 수치를 JSON으로
     저장하고 `MANUAL`로 복귀합니다.
 
@@ -145,6 +151,21 @@ IMU_UPPER_PITCH_OFFSET_DEG = 0.0
 `IMU_REQUIRED=True`가 실제 운용 기본값입니다. `False`는 모터를 분리한 벤치
 검사용이며, 자동 보정 실패 상태에서 실제 장비를 운용하는 용도가 아닙니다.
 
+## 수동 ALT 이동 범위
+
+IMU 정렬 직후 소프트웨어 ALT는 0°입니다. 추적용 `MIN_ALTITUDE=0.0`을 수동
+조작에도 적용하면 하강 방향이 잠기는 문제가 있으므로 수동 범위를 분리했습니다.
+
+```python
+MANUAL_ALT_SOFT_LIMITS_ENABLED = False
+MANUAL_MIN_ALTITUDE = -30.0
+MANUAL_MAX_ALTITUDE = 90.0
+```
+
+기본값은 수동 소프트 제한 해제입니다. 제한을 사용하려면 첫 값을 `True`로 바꾸고
+실제 기구가 안전하게 움직일 수 있는 최소·최대 각도를 현장에서 확인해 설정하십시오.
+자동 추적에는 기존 `MIN_ALTITUDE`와 `MAX_ALTITUDE`가 계속 적용됩니다.
+
 ## 최종 촬영과 시야 회전
 
 ALT/AZ 2축 구조는 목표 중심을 따라가도 장노출 중 화면 회전을 제거하지 못합니다.
@@ -154,26 +175,37 @@ ALT/AZ 2축 구조는 목표 중심을 따라가도 장노출 중 화면 회전�
 FINAL_CAPTURE_MODE = "sequence"
 FINAL_SUBEXPOSURE_SECONDS = 10.0
 FINAL_FRAME_COUNT = 18
+FINAL_FRAME_INTERVAL_SECONDS = 0.0
+FINAL_DRIFT_CORRECTION_EVERY_FRAMES = 3
 ```
 
-총 적분시간은 약 180초이며, 결과 프레임은 후처리 프로그램에서 정렬·회전 보정·
-스태킹해야 합니다. `FINAL_CAPTURE_MODE="single"`과 180초 단일 노출은 실험
+기본 총 적분시간은 180초입니다. 각 프레임을 저장한 뒤 설정된 간격만큼 기다리며,
+3장마다 다음 프레임 전에 별도 plate-solving 사진으로 위치를 다시 맞춥니다.
+이 보정 사진은 최종 장노출 프레임에 포함되지 않습니다.
+
+최종 저장물은 `data/images/final_sequence` 아래의 서로 다른 JPG 18장입니다.
+마지막 한 장만 남기는 것도 아니고, 18장을 합친 한 장을 만드는 것도 아닙니다.
+결과 프레임은 후처리 프로그램에서 별 정렬·시야 회전 보정·스태킹해야 합니다.
+`FINAL_CAPTURE_MODE="single"`과 `LONG_EXPOSURE_SECONDS` 단일 노출은 실험
 모드로 남아 있지만 화면 외곽 별의 선명도를 보장하지 않습니다.
 
 ## 로그
 
-각 세션은 `data/logs`에 두 JSON 파일을 저장합니다.
+각 세션은 `data/logs`에 다음 파일을 저장합니다.
 
 - `tracking_*.json`: IMU 보정 결과, 관측자, 목표, 보정 오차, 상태 이벤트,
   최종 이미지 경로
 - `platesolving_*.json`: 최초 목표와 모든 drift-correction solve 결과
+- `console_*.log`: 프로그램 실행 중 stdout과 stderr에 출력된 전체 콘솔 로그
 
 ## 안전 주의사항
 
 - 현재 장비에는 물리 리미트 스위치가 없습니다. 전원을 켤 때 상단판을 기계적
   끝점에서 충분히 떨어뜨려 놓아야 합니다.
 - 최초 실기 시험은 벨트 또는 카메라 하중을 제거하고 저속으로 수행하십시오.
-- 프로그램의 ALT 0~90° 제한은 IMU 보정이 성공한 위치를 기준으로 합니다.
+- 자동 추적의 ALT 0~90° 제한은 IMU 보정이 성공한 위치를 기준으로 합니다.
+- 기본 설정에서는 수동 ALT 소프트 제한이 꺼져 있습니다. 물리 리미트 스위치가
+  없으므로 첫 시험에서는 기계적 끝점에 닿기 전에 조이스틱을 놓아야 합니다.
 - BLE가 끊기거나 추적 오류가 발생하면 모터 추적을 중단합니다.
 - 버튼은 TARGET_CAPTURE, TRACKING, DRIFT_CORRECTION, CAPTURE 중에도 중단
 요청으로 동작합니다. 진행 중인 카메라 노출은 끝난 후 다음 프레임부터 취소됩니다.
