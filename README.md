@@ -1,5 +1,15 @@
 # StarTracker
 
+**현재 기본 제어: MPU6050 가속도계·자이로 칼만 필터 → EL 폐루프 제어**.
+설정·실행·제약은 [IMU_CONTROL.md](IMU_CONTROL.md)를 참고하세요.
+`python simulate_imu_control.py` → `data/kalman_demo/report.html`에서 PC 시뮬레이션을 확인합니다.
+AZ는 기존 스텝 추정과 Plate Solving 보정을 유지합니다.
+
+이전 엔코더 선택형 확장: [CONTROL_PROJECT.md](CONTROL_PROJECT.md).
+하드웨어 없이 `python simulate_control.py`를 실행하면
+`data/control_demo/report.html`에 목표각/실제각/오차 그래프가 생성됩니다.
+엔코더 모델이 미정이므로 `ENCODER_ENABLED=False`가 기본값입니다.
+
 현재 기본 촬영 흐름은 [PIPELINED_CAPTURE.md](PIPELINED_CAPTURE.md)를 참고하세요.
 최초 목표 plate solving 후 즉시 연속 장노출을 시작하고, 이전 완료 사진으로
 다음 촬영 중 병렬 보정합니다. 보정 15회 후 18장 촬영 흐름은

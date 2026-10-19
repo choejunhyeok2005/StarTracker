@@ -12,6 +12,8 @@ High Level Motor Controller
 """
 
 import threading
+import math
+import time
 from enum import Enum, auto
 
 import config
@@ -27,7 +29,7 @@ class MotorMode(Enum):
 
 class MotorController:
 
-    def __init__(self, driver=None):
+    def __init__(self, driver=None, encoder=None, telemetry=None, clock=time.monotonic):
 
         if driver is None:
             # Import lazily so hardware-free controller tests do not require
@@ -37,6 +39,12 @@ class MotorController:
             driver = MotorDriver()
 
         self.driver = driver
+        self.feedback = None
+        self.imu_feedback = None
+        self._encoder_pending = encoder is None and getattr(config, "ENCODER_ENABLED", False)
+        self._feedback_clock, self._feedback_telemetry = clock, telemetry
+        if encoder is not None:
+            self._create_feedback(encoder)
 
         self.mode = MotorMode.STOP
 
@@ -75,6 +83,10 @@ class MotorController:
 
     def initialize(self):
 
+        if self._encoder_pending:
+            from hardware.encoder import configured_encoder
+            self._create_feedback(configured_encoder())
+            self._encoder_pending = False
         self.driver.initialize()
 
         self.driver.set_mode(
@@ -86,6 +98,63 @@ class MotorController:
         self.mode = MotorMode.STOP
 
         print("[MotorController] Ready")
+
+    def _create_feedback(self, encoder):
+        from controllers.encoder_feedback import EncoderFeedback
+        telemetry = self._feedback_telemetry
+        try:
+            if telemetry is None and config.CONTROL_TELEMETRY_ENABLED:
+                from datetime import datetime
+                from services.control_telemetry import ControlTelemetry
+                telemetry = ControlTelemetry(
+                    f"data/logs/control_{datetime.now():%Y%m%d_%H%M%S_%f}.csv")
+            self.feedback = EncoderFeedback(encoder, telemetry, self._feedback_clock)
+        except Exception:
+            encoder.close()
+            if telemetry:
+                telemetry.close()
+            raise
+
+    def enable_imu_tracking(self, imu, sensor=None):
+        """Attach the already-initialized upper MPU6050 after startup alignment."""
+        if self.feedback or self._encoder_pending:
+            raise ValueError("Select either encoder feedback or IMU EL feedback")
+        if self.imu_feedback:
+            return
+        if config.IMU_FILTER_MODE not in ("kalman", "lowpass"):
+            raise ValueError("IMU_FILTER_MODE must be kalman or lowpass")
+        from controllers.imu_tracking_controller import IMUTrackingController
+        from hardware.imu import IMUAltitudeSensor
+        selected_sensor = sensor or IMUAltitudeSensor(imu, self._feedback_clock)
+        initial_bias = 0.0
+        try:
+            if config.IMU_FILTER_MODE == "kalman":
+                initial_bias = selected_sensor.calibrate().bias
+        except Exception:
+            self.stop()
+            raise
+        telemetry = self._feedback_telemetry
+        if telemetry is None and config.CONTROL_TELEMETRY_ENABLED:
+            from datetime import datetime
+            from services.control_telemetry import ControlTelemetry
+            telemetry = ControlTelemetry(f"data/logs/imu_control_{datetime.now():%Y%m%d_%H%M%S_%f}.csv")
+        try:
+            feedback = IMUTrackingController(
+                selected_sensor, telemetry, self._feedback_clock, initial_bias=initial_bias)
+            feedback.reference(self.current_alt)
+        except Exception:
+            if telemetry:
+                telemetry.close()
+            self.stop()
+            raise
+        self.imu_feedback = feedback
+
+    def _imu_position(self):
+        try:
+            return self.imu_feedback.position()
+        except Exception:
+            self.stop()
+            raise
 
     # =====================================================
     # Manual Control
@@ -123,6 +192,15 @@ class MotorController:
         # ALT와 AZ는 서로 다른 Lock을 사용하므로
         # 조이스틱 대각선 입력 시 두 축이 동시에 움직일 수 있다.
         with axis_lock:
+
+            if self.imu_feedback:
+                with self._motor_lock:
+                    self._move_manual_imu(axis, direction, steps, pulse_delay)
+                return
+            if self.feedback:
+                with self._motor_lock:
+                    self._move_manual_feedback(axis, direction, steps, pulse_delay)
+                return
 
             manual_alt_limits_enabled = bool(
                 getattr(
@@ -280,6 +358,9 @@ class MotorController:
             self._alignment_max_relative_steps = 0
             self.mode = MotorMode.STOP
 
+            if self.feedback:
+                self.feedback.reference(0.0, self.current_az)
+
     def abort_alignment(self) -> None:
         """Leave ALIGN mode without claiming a valid physical ALT zero."""
 
@@ -303,10 +384,16 @@ class MotorController:
                 "Tracking target cannot be set during IMU alignment."
             )
 
-        self.mode = MotorMode.TRACKING
-
-        self.target_alt = self._clamp_altitude(alt)
-        self.target_az = self._normalize_azimuth(az)
+        if not all(math.isfinite(v) for v in (alt, az)):
+            raise ValueError("Target angles must be finite")
+        with self._motor_lock:
+            if self.feedback and self.mode != MotorMode.TRACKING:
+                self.feedback.reset()
+            if self.imu_feedback and self.mode != MotorMode.TRACKING:
+                self.imu_feedback.reset()
+            self.mode = MotorMode.TRACKING
+            self.target_alt = self._clamp_altitude(alt)
+            self.target_az = self._normalize_azimuth(az)
 
     # 이전 코드와의 호환용
     def goto(
@@ -329,6 +416,14 @@ class MotorController:
 
         with self._motor_lock:
 
+            if self.imu_feedback:
+                try:
+                    self.imu_feedback.reference(alt)
+                except Exception:
+                    self.stop()
+                    raise
+            if self.feedback:
+                self.feedback.reference(alt, az)
             self.current_alt = self._clamp_altitude(alt)
             self.current_az = self._normalize_azimuth(az)
 
@@ -339,15 +434,42 @@ class MotorController:
     def apply_position_offset(self, alt_offset: float, az_offset: float):
         """Apply measured pointing error without losing subsequent tracking steps."""
         with self._motor_lock:
+            if self.imu_feedback:
+                self.imu_feedback.shift_reference(alt_offset)
+                self.current_alt = self._imu_position()
+                self.current_az = self._normalize_azimuth(self.current_az + az_offset)
+                return
+            if self.feedback:
+                self.feedback.shift_reference(alt_offset, az_offset)
+                self.current_alt, self.current_az = self.feedback.position()
+                return
             self.current_alt = self._clamp_altitude(self.current_alt + alt_offset)
             self.current_az = self._normalize_azimuth(self.current_az + az_offset)
 
     def update(self):
+        try:
+            self._update_position()
+        except Exception as error:
+            if self.imu_feedback:
+                self.imu_feedback.fault = str(error)
+                self.stop()
+            raise
+
+    def _update_position(self):
 
         if self.mode != MotorMode.TRACKING:
             return
 
         with self._motor_lock:
+
+            if self.feedback:
+                try:
+                    self.feedback.update(self)
+                except Exception as error:
+                    self.feedback.fault = str(error)
+                    self.stop()
+                    raise
+                return
 
             alt_error = (
                 self.target_alt
@@ -362,11 +484,15 @@ class MotorController:
 
             alt_steps = 0
             az_steps = 0
+            imu_speed = 0.0
 
             alt_direction = alt_error >= 0
             az_direction = az_error >= 0
 
-            if abs(alt_error) >= config.ANGLE_TOLERANCE:
+            if self.imu_feedback:
+                signed_steps, imu_speed = self.imu_feedback.steps(self)
+                alt_steps, alt_direction = abs(signed_steps), signed_steps >= 0
+            elif abs(alt_error) >= config.ANGLE_TOLERANCE:
 
                 requested_alt_steps = self.angle_to_steps(
                     abs(alt_error)
@@ -388,6 +514,11 @@ class MotorController:
                     config.MAX_STEP_PER_UPDATE,
                 )
 
+            if self.imu_feedback:
+                self.imu_feedback.record(self, alt_steps if alt_direction else -alt_steps,
+                                         imu_speed, az_steps if az_direction else -az_steps)
+            if self.mode != MotorMode.TRACKING:
+                return
             if alt_steps == 0 and az_steps == 0:
                 return
 
@@ -405,7 +536,7 @@ class MotorController:
             )
 
             self._apply_step_position_update(
-                alt_steps=alt_steps,
+                alt_steps=0 if self.imu_feedback else alt_steps,
                 alt_direction=alt_direction,
                 az_steps=az_steps,
                 az_direction=az_direction,
@@ -455,6 +586,13 @@ class MotorController:
 
     def reached_target(self):
 
+        if self.imu_feedback:
+            with self._motor_lock:
+                self.current_alt = self._imu_position()
+        if self.feedback:
+            with self._motor_lock:
+                self.current_alt, self.current_az = self.feedback.position()
+
         alt_error = abs(
             self.target_alt
             - self.current_alt
@@ -468,9 +606,12 @@ class MotorController:
         )
 
         return (
-            alt_error < config.ANGLE_TOLERANCE
+            alt_error <= (self.feedback.pid["ALT"].tolerance if self.feedback
+                          else self.imu_feedback.pid.tolerance if self.imu_feedback
+                          else config.ANGLE_TOLERANCE)
             and
-            az_error < config.ANGLE_TOLERANCE
+            az_error < (self.feedback.pid["AZ"].tolerance if self.feedback
+                        else config.ANGLE_TOLERANCE)
         )
 
     # =====================================================
@@ -478,6 +619,14 @@ class MotorController:
     # =====================================================
 
     def resume(self):
+        if self.imu_feedback:
+            if self.imu_feedback.fault:
+                raise RuntimeError("IMU fault is latched; inspect hardware and restart")
+            self.imu_feedback.reset()
+        if self.feedback:
+            if self.feedback.fault:
+                raise RuntimeError("Encoder fault is latched; inspect hardware and restart")
+            self.feedback.reset()
         resume_driver = getattr(self.driver, "resume", None)
         if resume_driver is not None:
             resume_driver()
@@ -576,4 +725,53 @@ class MotorController:
         self.alignment_relative_steps = 0
         self._alignment_max_relative_steps = 0
 
-        self.driver.cleanup()
+        try:
+            self.driver.cleanup()
+        finally:
+            if self.feedback:
+                self.feedback.close()
+            if self.imu_feedback:
+                self.imu_feedback.close()
+
+    def _move_manual_imu(self, axis, direction, steps, pulse_delay):
+        """Manual jog uses measured EL and existing step-based AZ, without holding a target."""
+        self.current_alt = self._imu_position()
+        steps = min(int(steps), config.MAX_STEP_PER_UPDATE)
+        if axis == "ALT":
+            bound = (config.MANUAL_MAX_ALTITUDE - self.current_alt if direction
+                     else self.current_alt - config.MANUAL_MIN_ALTITUDE)
+            steps = min(steps, int(max(0, bound) / self.step_angle))
+        if steps <= 0:
+            return
+        self.mode = MotorMode.MANUAL
+        self.imu_feedback.reset()
+        try:
+            self.driver.drive(axis=axis, direction=self._to_driver_direction(axis, direction),
+                              steps=steps, pulse_delay=pulse_delay)
+        except Exception as error:
+            self.imu_feedback.fault = str(error)
+            self.stop()
+            raise
+        if axis == "AZ":
+            self.current_az = (self.current_az + self.steps_to_angle(steps) * (1 if direction else -1)) % 360
+
+    def _move_manual_feedback(self, axis, direction, steps, pulse_delay):
+        """Bound manual bursts using fresh encoder readings; no PID target hold."""
+        try:
+            self.current_alt, self.current_az = self.feedback.position()
+            steps = min(int(steps), config.MAX_STEP_PER_UPDATE)
+            if axis == "ALT":
+                bound = (config.MANUAL_MAX_ALTITUDE - self.current_alt if direction
+                         else self.current_alt - config.MANUAL_MIN_ALTITUDE)
+                steps = min(steps, int(max(0, bound) / self.step_angle))
+            if steps <= 0:
+                return
+            self.mode = MotorMode.MANUAL
+            self.feedback.reset()
+            self.driver.drive(axis=axis, direction=self._to_driver_direction(axis, direction),
+                              steps=steps, pulse_delay=pulse_delay)
+            self.current_alt, self.current_az = self.feedback.position()
+        except Exception as error:
+            self.feedback.fault = str(error)
+            self.stop()
+            raise

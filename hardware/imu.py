@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import statistics
 import time
+from dataclasses import dataclass
 from collections.abc import Callable
 from types import TracebackType
 from typing import Any
@@ -20,6 +21,85 @@ class IMUInitializationError(IMUError):
 
 class IMUReadError(IMUError):
     """가속도계 샘플에서 유효한 피치를 생성할 수 없을 때 발생"""
+
+
+@dataclass(frozen=True)
+class AltitudeSample:
+    angle: float
+    timestamp: float
+    gyro_rate: float | None = None  # positive with increasing Y/Z tilt, deg/s
+
+
+@dataclass(frozen=True)
+class GyroCalibration:
+    bias: float
+    std: float
+    samples: int
+
+
+class IMUAltitudeSensor:
+    """Strict gravity tilt and gyro X for slow EL control (not yaw).
+
+    Uses upper-sensor Y-Z tilt, +/-2g acceleration and +/-250 deg/s gyro.
+    The pair is owned and closed by TrackingManager, not this adapter.
+    """
+    def __init__(self, pair, clock=time.monotonic, sleep=time.sleep):
+        self.pair, self.clock = pair, clock
+        self.sleep = sleep
+
+    def read(self):
+        import config
+        started = self.clock()
+        gyro_rate = None
+        if config.IMU_FILTER_MODE == "kalman":
+            xyz, gyro_xyz = self.pair.read_motion(self.pair.upper_address)
+            if config.IMU_GYRO_X_SIGN not in (-1, 1):
+                raise IMUReadError("IMU_GYRO_X_SIGN must be -1 or +1")
+            gyro_rate = config.IMU_GYRO_X_SIGN * gyro_xyz[0] / 131.0
+            if not all(math.isfinite(v) and abs(v / 131.0) <= config.IMU_GYRO_MAX_RATE_DPS
+                       for v in gyro_xyz):
+                raise IMUReadError("Invalid or excessive IMU gyro rate")
+        else:
+            xyz = self.pair.read_acceleration(self.pair.upper_address)
+        if self.clock() - started > config.IMU_TRACKING_MAX_READ_SECONDS:
+            raise IMUReadError("IMU read exceeded control deadline")
+        if not all(math.isfinite(v) for v in xyz):
+            raise IMUReadError("Nonfinite IMU acceleration")
+        gravity = math.sqrt(sum(v * v for v in xyz)) / 16384.0
+        if not config.IMU_TRACKING_MIN_GRAVITY_G <= gravity <= config.IMU_TRACKING_MAX_GRAVITY_G:
+            raise IMUReadError("IMU acceleration is inconsistent with stationary gravity")
+        if math.hypot(xyz[1], xyz[2]) / 16384.0 < 0.25:
+            raise IMUReadError("IMU Y-Z gravity projection is too small for EL estimation")
+        angle = acceleration_to_pitch(*xyz) - config.IMU_UPPER_PITCH_OFFSET_DEG
+        return AltitudeSample(angle, started, gyro_rate)
+
+    def calibrate(self):
+        """Estimate startup gyro X bias while motor commands are idle."""
+        import config
+        count, interval = config.IMU_GYRO_CALIBRATION_SAMPLES, config.IMU_GYRO_CALIBRATION_INTERVAL
+        if type(count) is not int or count < 2 or interval <= 0:
+            raise ValueError("Gyro calibration requires >=2 spaced samples")
+        print("[IMU] Gyro calibration: keep the mount still.")
+        self.sleep(config.IMU_GYRO_CALIBRATION_SETTLE)
+        samples = []
+        for index in range(count):
+            sample = self.read()
+            if sample.gyro_rate is None:
+                raise IMUReadError("Gyro sample required for calibration")
+            if samples and sample.timestamp <= samples[-1].timestamp:
+                raise IMUReadError("Calibration samples must advance in time")
+            samples.append(sample)
+            if index + 1 < count:
+                self.sleep(interval)
+        rates = [s.gyro_rate for s in samples]
+        tilts = [(s.angle - samples[0].angle + 180) % 360 - 180 for s in samples]
+        bias, std = statistics.mean(rates), statistics.stdev(rates)
+        if (std > config.IMU_GYRO_CALIBRATION_MAX_STD_DPS
+                or max(tilts) - min(tilts) > config.IMU_GYRO_CALIBRATION_MAX_TILT_RANGE
+                or abs(bias) > config.IMU_GYRO_CALIBRATION_MAX_BIAS_DPS):
+            raise IMUReadError("Mount moved or gyro bias was excessive during calibration")
+        print(f"[IMU] Gyro X bias={bias:+.5f} deg/s, std={std:.5f}")
+        return GyroCalibration(bias, std, count)
 
 
 def signed_int16(high: int, low: int) -> int:
@@ -62,6 +142,7 @@ class MPU6050Pair:
     WHO_AM_I = 0x75
     POWER_MANAGEMENT_1 = 0x6B
     ACCELEROMETER_CONFIG = 0x1C
+    GYROSCOPE_CONFIG = 0x1B
     DIGITAL_LOW_PASS_CONFIG = 0x1A
     ACCELEROMETER_START = 0x3B
 
@@ -140,6 +221,7 @@ class MPU6050Pair:
 
                 self._bus.write_byte_data(address, self.POWER_MANAGEMENT_1, 0x00)
                 self._bus.write_byte_data(address, self.ACCELEROMETER_CONFIG, 0x00)
+                self._bus.write_byte_data(address, self.GYROSCOPE_CONFIG, 0x00)  # +/-250 deg/s, 131 LSB/(deg/s)
                 self._bus.write_byte_data(address, self.DIGITAL_LOW_PASS_CONFIG, 0x03)
 
             self._sleep(0.05)
@@ -156,6 +238,31 @@ class MPU6050Pair:
                 raise IMUInitializationError(
                     f"MPU6050 쌍 초기화 실패: {error}"
                 ) from error
+
+    def read_motion(self, address: int):
+        """One 14-byte burst: accel XYZ, temperature (skipped), gyro XYZ.
+
+        MPU6050 register map: 0x3B..0x48; gyro X starts at 0x43.
+        This path is strict even when the legacy alignment is permissive.
+        """
+        if not self.initialized or self._bus is None:
+            raise IMUReadError("MPU6050Pair is not initialized")
+        if address not in (self.base_address, self.upper_address):
+            raise ValueError("Unknown IMU address")
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                data = self._bus.read_i2c_block_data(address, self.ACCELEROMETER_START, 14)
+                if len(data) != 14:
+                    raise IMUReadError("Incomplete accelerometer/gyro burst")
+                accel = tuple(signed_int16(data[i], data[i + 1]) for i in (0, 2, 4))
+                gyro = tuple(signed_int16(data[i], data[i + 1]) for i in (8, 10, 12))
+                return accel, gyro
+            except Exception as error:
+                last_error = error
+                if attempt + 1 < self.max_retries:
+                    self._sleep(0.005)
+        raise IMUReadError(f"Accelerometer/gyro read failed: {last_error}") from last_error
 
     def read_pitch(self, address: int) -> float:
         """I2C 재시도 로직을 포함하여 피치 각도를 읽어옵니다."""

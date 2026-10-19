@@ -58,7 +58,12 @@ class SessionController:
             tracking._safe_log(tracking.logger.finish_session,
                                status=getattr(tracking, "stop_reason", "session_ended"),
                                ended_at_utc=tracking._current_time_iso())
-            if (self.ble.running and not closing
+            control_fault = any(getattr(getattr(tracking.motor, name, None), "fault", None)
+                                for name in ("imu_feedback", "feedback"))
+            if control_fault:
+                tracking.manual_enabled = False
+                print("[Session] Sensor fault latched; motor remains stopped until restart.")
+            if (self.ble.running and not closing and not control_fault
                     and not (getattr(tracking, "capture_completed", False)
                              and config.EXIT_AFTER_CAPTURE)):
                 await asyncio.to_thread(tracking.camera.start_streaming)

@@ -9,6 +9,16 @@ from managers.state_manager import StateManager, SystemState
 
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_imu_fault_keeps_motor_and_manual_control_stopped(self):
+        session, tracking, ble = self.make_session()
+        tracking.motor.imu_feedback = SimpleNamespace(fault="IMU read failed")
+        ble.on_start()
+        await session.run_pending()
+        tracking.motor.resume.assert_not_called()
+        tracking.camera.start_streaming.assert_not_called()
+        self.assertFalse(tracking.manual_enabled)
+        self.assertFalse(session.busy)
+
     def make_session(self):
         tracking = SimpleNamespace(
             camera=SimpleNamespace(stop_streaming=Mock(), start_streaming=Mock()),

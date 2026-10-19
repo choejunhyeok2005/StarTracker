@@ -1,5 +1,9 @@
 __pycache__/
 *.py[cod]
+.test-tmp/
+dist/
+data/logs/control_*.csv
+data/logs/imu_control_*.csv
 data/images/*.jpg
 data/images/**/*.jpg
 data/images/*.new

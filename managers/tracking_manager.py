@@ -140,6 +140,9 @@ class TrackingManager:
         if self._hardware_initialized:
             return self.alignment_result
 
+        continuous_imu = config.IMU_TRACKING_ENABLED
+        if continuous_imu and (not config.IMU_ENABLED or config.ENCODER_ENABLED):
+            raise ValueError("IMU tracking requires IMU_ENABLED=True and ENCODER_ENABLED=False")
         self.motor.initialize()
         self.state.set_state(SystemState.ALIGN)
 
@@ -153,8 +156,11 @@ class TrackingManager:
                         settings=AlignmentSettings.from_config(),
                     )
                     self.alignment_result = leveler.align()
+                    if continuous_imu:
+                        self.motor.enable_imu_tracking(self.imu)
                 finally:
-                    self.imu.close()
+                    if not continuous_imu:
+                        self.imu.close()
             else:
                 print(
                     "[IMU] Alignment disabled; operator must establish "
@@ -164,10 +170,12 @@ class TrackingManager:
                     self.motor.set_current_position(alt=0.0, az=0.0)
 
         except Exception as error:
+            if continuous_imu:
+                self.imu.close()
             self.state.set_state(SystemState.INIT)
             self.motor.stop()
 
-            if config.IMU_REQUIRED:
+            if config.IMU_REQUIRED or continuous_imu:
                 raise RuntimeError(
                     f"Required IMU alignment failed: {error}"
                 ) from error
@@ -176,7 +184,13 @@ class TrackingManager:
             if hasattr(self.motor, "set_current_position"):
                 self.motor.set_current_position(alt=0.0, az=0.0)
 
-        self.camera.initialize()
+        try:
+            self.camera.initialize()
+        except Exception:
+            self.motor.stop()
+            if continuous_imu:
+                self.imu.close()
+            raise
         self._hardware_initialized = True
         self.state.set_state(SystemState.INIT)
 

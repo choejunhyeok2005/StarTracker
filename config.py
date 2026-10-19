@@ -105,6 +105,28 @@ MOTOR_PULSE_DELAY = 0.001
 # Tracking Loop 한 번에 축별로 이동할 최대 스텝 수
 MAX_STEP_PER_UPDATE = 5
 
+# Optional encoder feedback. Hardware model/pins are not selected yet.
+# counts_per_rev: x4 decoded counts per FINAL OUTPUT AXIS revolution.
+# Motor-shaft encoder: include gearing, but downstream backlash is unobserved.
+ENCODER_ENABLED = False
+ENCODER_AXES = {
+    "ALT": {"pins": (None, None), "counts_per_rev": None, "sign": 1},
+    "AZ": {"pins": (None, None), "counts_per_rev": None, "sign": 1},
+}
+ENCODER_MAX_SAMPLE_AGE = 0.2
+ENCODER_MAX_CONTROL_GAP = 0.5
+ENCODER_STALL_TIMEOUT = 3.0
+ENCODER_STALL_MIN_MOVEMENT = 0.005
+ENCODER_STALL_COMMAND_DEG = 0.05
+CONTROL_TELEMETRY_ENABLED = True
+# Conservative starting gains, NOT hardware-tuned. Units: degrees, seconds.
+POSITION_PID = {
+    "ALT": dict(kp=2.0, ki=0.0, kd=0.0, max_speed=0.10,
+                max_acceleration=0.20, tolerance=0.01),
+    "AZ": dict(kp=2.0, ki=0.0, kd=0.0, max_speed=0.10,
+               max_acceleration=0.20, tolerance=0.01),
+}
+
 # 목표에 도달했다고 판단할 각도 오차
 ANGLE_TOLERANCE = 0.03
 
@@ -125,6 +147,35 @@ MANUAL_MAX_ALTITUDE = 90.0
 
 IMU_ENABLED = True
 IMU_REQUIRED = True
+
+# Continuous EL feedback using the existing upper MPU6050. AZ stays step-based.
+# Disable this flag to restore startup-alignment-only operation.
+IMU_TRACKING_ENABLED = True
+IMU_FILTER_MODE = "kalman"  # "kalman" (default) or legacy "lowpass"
+IMU_KALMAN_Q_ANGLE = 0.01  # angle process noise spectral density, deg^2/s
+IMU_KALMAN_Q_BIAS = 0.0001  # bias random walk, (deg/s)^2/s
+IMU_KALMAN_R_ANGLE = 0.09  # gravity angle measurement variance, deg^2
+IMU_KALMAN_INITIAL_BIAS_VARIANCE = 0.01  # (deg/s)^2 after startup calibration
+IMU_GYRO_X_SIGN = 1  # gyro X must increase with atan2(accel Y, accel Z)
+IMU_GYRO_MAX_RATE_DPS = 100.0  # saturation/large unexpected motion rejection
+IMU_GYRO_CALIBRATION_SAMPLES = 100
+IMU_GYRO_CALIBRATION_INTERVAL = 0.01
+IMU_GYRO_CALIBRATION_SETTLE = 0.25
+IMU_GYRO_CALIBRATION_MAX_STD_DPS = 0.30
+IMU_GYRO_CALIBRATION_MAX_TILT_RANGE = 0.50
+IMU_GYRO_CALIBRATION_MAX_BIAS_DPS = 5.0
+IMU_TRACKING_PID = dict(kp=0.8, ki=0.0, kd=0.0, max_speed=0.10,
+                        max_acceleration=0.20, tolerance=0.15)
+IMU_TRACKING_FILTER_TAU = 0.25  # seconds; first-order low-pass on gravity tilt
+IMU_TRACKING_MAX_READ_SECONDS = 0.15
+IMU_TRACKING_MAX_GAP = 0.5
+IMU_TRACKING_MAX_JUMP_DEG = 5.0
+IMU_TRACKING_LIMIT_MARGIN_DEG = 1.0  # reject gross limit violation despite noise
+IMU_TRACKING_MIN_GRAVITY_G = 0.75
+IMU_TRACKING_MAX_GRAVITY_G = 1.25
+IMU_TRACKING_STALL_SECONDS = 8.0
+IMU_TRACKING_STALL_COMMAND_DEG = 0.30
+IMU_TRACKING_STALL_MOVEMENT_DEG = 0.05
 
 IMU_I2C_BUS = 1
 IMU_BASE_ADDRESS = 0x68
