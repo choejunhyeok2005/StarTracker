@@ -1,5 +1,7 @@
 import unittest
+from unittest.mock import patch
 
+import config
 from controllers.motor_controller import MotorController, MotorMode
 
 
@@ -119,6 +121,46 @@ class MotorAlignmentModeTests(unittest.TestCase):
 
         self.assertFalse(self.driver.drives[-1]["direction"])
         self.assertGreater(self.controller.current_alt, 0.0)
+
+    def test_manual_alt_can_move_below_alignment_zero_when_limits_disabled(self):
+        """Catch reintroducing the one-direction lock at ALT zero."""
+
+        self.controller.current_alt = 0.0
+
+        with patch.object(
+            config,
+            "MANUAL_ALT_SOFT_LIMITS_ENABLED",
+            False,
+            create=True,
+        ):
+            self.controller.move_manual(
+                axis="ALT",
+                direction=False,
+                steps=10,
+            )
+
+        self.assertEqual(len(self.driver.drives), 1)
+        self.assertEqual(self.driver.drives[0]["axis"], "ALT")
+        self.assertLess(self.controller.current_alt, 0.0)
+
+    def test_manual_alt_uses_its_configured_soft_limit(self):
+        """Catch accidentally reusing the tracking-only 0° lower limit."""
+
+        self.controller.current_alt = 0.0
+
+        with (
+            patch.object(config, "MANUAL_ALT_SOFT_LIMITS_ENABLED", True),
+            patch.object(config, "MANUAL_MIN_ALTITUDE", -1.0),
+            patch.object(config, "MANUAL_MAX_ALTITUDE", 45.0),
+        ):
+            self.controller.move_manual(
+                axis="ALT",
+                direction=False,
+                steps=10,
+            )
+
+        self.assertEqual(len(self.driver.drives), 1)
+        self.assertLess(self.controller.current_alt, 0.0)
 
 
 if __name__ == "__main__":

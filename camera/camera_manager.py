@@ -12,11 +12,11 @@ Raspberry Pi HQ Camera Manager
 
 import threading
 import time
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-import cv2
 
 import config
 
@@ -38,6 +38,8 @@ class CameraManager:
 
         # 스트리밍 상태 플래그
         self._streaming = False
+        self._long_exposure_settings = None
+        self.last_exposure_metadata = None
 
     # ==================================================
     # Initialize
@@ -93,11 +95,19 @@ class CameraManager:
         """Preview 설정으로 스트리밍을 시작한다."""
 
         with self._camera_lock:
+            self._long_exposure_settings = None
 
             if self._streaming:
                 return
 
             self._ensure_camera()
+
+            # 기존 설정을 중지하고 스트리밍 설정으로 변경
+            try:
+                if self.camera.started:
+                    self.camera.stop()
+            except Exception as error:
+                print(f"[Camera] Stop warning before streaming: {error}")
 
             # 스트리밍용 preview 설정
             stream_config = self.camera.create_preview_configuration(
@@ -108,6 +118,7 @@ class CameraManager:
             )
 
             self.camera.configure(stream_config)
+            self.camera.set_controls({"AeEnable": True})
             self.camera.start()
 
             time.sleep(config.CAMERA_WARMUP_SECONDS)
@@ -136,9 +147,14 @@ class CameraManager:
 
     def generate_frames(self):
         """Flask MJPEG 스트림용 제너레이터."""
+        import cv2
 
         if not self._streaming:
+            print("[Camera] Frame generation called but streaming not started", file=sys.stderr)
             return
+
+        consecutive_errors = 0
+        max_consecutive_errors = 5
 
         while self._streaming:
             try:
@@ -148,14 +164,27 @@ class CameraManager:
 
                     frame = self.camera.capture_array()
 
+                if frame is None:
+                    consecutive_errors += 1
+                    if consecutive_errors >= max_consecutive_errors:
+                        print(f"[Camera] Frame generation error: null frame after {consecutive_errors} attempts", file=sys.stderr)
+                        break
+                    continue
+
                 ret, buf = cv2.imencode(".jpg", frame, [
                     cv2.IMWRITE_JPEG_QUALITY,
                     config.STREAMING_JPEG_QUALITY
                 ])
 
                 if not ret:
+                    consecutive_errors += 1
+                    if consecutive_errors >= max_consecutive_errors:
+                        print(f"[Camera] JPEG encoding error after {consecutive_errors} attempts", file=sys.stderr)
+                        break
                     continue
 
+                consecutive_errors = 0  # Reset on success
+                
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n\r\n"
@@ -164,8 +193,11 @@ class CameraManager:
                 )
 
             except Exception as error:
-                print(f"[Camera] Frame generation error: {error}")
-                break
+                consecutive_errors += 1
+                print(f"[Camera] Frame generation error ({consecutive_errors}/{max_consecutive_errors}): {error}", file=sys.stderr)
+                if consecutive_errors >= max_consecutive_errors:
+                    break
+                time.sleep(0.1)
 
     # ==================================================
     # Plate Solving Capture
@@ -189,6 +221,28 @@ class CameraManager:
         )
 
         with self._camera_lock:
+            # 스트리밍 설정이 적용되어 있으면 Plate Solving 설정으로 변경
+            self._long_exposure_settings = None
+            try:
+                if self.camera.started:
+                    self.camera.stop()
+            except Exception:
+                pass
+            
+            # Plate Solving 설정으로 변경 (streaming 상태와 무관하게 항상 실행)
+            plate_config = self.camera.create_still_configuration(
+                main={
+                    "size": (
+                        config.CAMERA_IMAGE_WIDTH,
+                        config.CAMERA_IMAGE_HEIGHT,
+                    ),
+                    "format": config.CAMERA_FORMAT,
+                },
+                buffer_count=2,
+            )
+            self.camera.configure(plate_config)
+            self.camera.start()
+            time.sleep(config.CAMERA_WARMUP_SECONDS)
 
             self.camera.set_controls(
                 {
@@ -219,6 +273,8 @@ class CameraManager:
         directory: Optional[str] = None,
         frame_count: Optional[int] = None,
         exposure_time: Optional[float] = None,
+        frame_interval_seconds: Optional[float] = None,
+        after_frame: Optional[Callable[[int, str], None]] = None,
         cancel_event=None,
     ) -> list[str]:
         """Capture short subframes, stopping cleanly between frames."""
@@ -229,14 +285,21 @@ class CameraManager:
             frame_count = config.FINAL_FRAME_COUNT
         if exposure_time is None:
             exposure_time = config.FINAL_SUBEXPOSURE_SECONDS
+        if frame_interval_seconds is None:
+            frame_interval_seconds = config.FINAL_FRAME_INTERVAL_SECONDS
 
         frame_count = int(frame_count)
         exposure_time = float(exposure_time)
+        frame_interval_seconds = float(frame_interval_seconds)
 
         if frame_count <= 0:
             raise ValueError("frame_count must be greater than zero.")
         if exposure_time <= 0:
             raise ValueError("exposure_time must be greater than zero.")
+        if frame_interval_seconds < 0:
+            raise ValueError(
+                "frame_interval_seconds must be zero or greater."
+            )
 
         if cancel_event is not None and cancel_event.is_set():
             return []
@@ -255,12 +318,24 @@ class CameraManager:
             filepath = output_directory / (
                 f"final_{sequence_id}_{frame_number:03d}.jpg"
             )
-            completed_paths.append(
-                self.capture_long_exposure(
-                    filename=str(filepath),
-                    exposure_time=exposure_time,
-                )
+            captured_path = self.capture_long_exposure(
+                filename=str(filepath),
+                exposure_time=exposure_time,
             )
+            completed_paths.append(captured_path)
+
+            if frame_number < frame_count and after_frame is not None:
+                after_frame(frame_number, captured_path)
+
+            if (
+                frame_number < frame_count
+                and frame_interval_seconds > 0
+            ):
+                if cancel_event is not None:
+                    if cancel_event.wait(frame_interval_seconds):
+                        break
+                else:
+                    time.sleep(frame_interval_seconds)
 
         return completed_paths
 
@@ -299,16 +374,24 @@ class CameraManager:
         )
 
         with self._camera_lock:
-
-            self.camera.set_controls(
-                {
+            settings = (exposure_microseconds, config.LONG_EXPOSURE_ANALOGUE_GAIN)
+            if self._long_exposure_settings != settings:
+                if self.camera.started:
+                    self.camera.stop()
+                controls = {
                     "AeEnable": False,
                     "ExposureTime": exposure_microseconds,
                     "AnalogueGain": config.LONG_EXPOSURE_ANALOGUE_GAIN,
+                    "FrameDurationLimits": (exposure_microseconds, exposure_microseconds),
                 }
-            )
-
-            time.sleep(config.CAMERA_CONTROL_SETTLE_SECONDS)
+                plate_config = self.camera.create_still_configuration(
+                    main={"size": (config.CAMERA_IMAGE_WIDTH, config.CAMERA_IMAGE_HEIGHT),
+                          "format": config.CAMERA_FORMAT},
+                    buffer_count=2, queue=False, controls=controls,
+                )
+                self.camera.configure(plate_config)
+                self.camera.start()
+                self._long_exposure_settings = settings
 
             print(
                 "[Camera] Long exposure started: "
@@ -316,7 +399,19 @@ class CameraManager:
             )
 
             # capture_file은 노출 및 파일 저장이 끝날 때까지 대기
-            self.camera.capture_file(str(filepath))
+            self.last_exposure_metadata = self.camera.capture_file(str(filepath))
+            metadata = self.last_exposure_metadata or {}
+            # SensorTimestamp is exposure-end time on CLOCK_BOOTTIME.
+            # Store the midpoint's age so the manager can use GNSS UTC.
+            self.last_exposure_midpoint_age_seconds = None
+            if "SensorTimestamp" in metadata and "ExposureTime" in metadata:
+                clock_id = getattr(time, "CLOCK_BOOTTIME", None)
+                now_ns = (time.clock_gettime_ns(clock_id) if clock_id is not None
+                          else time.monotonic_ns())
+                self.last_exposure_midpoint_age_seconds = (
+                    (now_ns - metadata["SensorTimestamp"]) / 1_000_000_000
+                    + metadata["ExposureTime"] / 2_000_000
+                )
 
         print(f"[Camera] Final image saved: {filepath}")
 
@@ -330,6 +425,7 @@ class CameraManager:
         """카메라를 안전하게 정지한다."""
 
         with self._camera_lock:
+            self._long_exposure_settings = None
 
             if self.camera is None:
                 return

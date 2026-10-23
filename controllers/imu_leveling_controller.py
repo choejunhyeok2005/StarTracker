@@ -158,9 +158,20 @@ class IMULevelingController:
                         - self.settings.base_pitch_offset_deg
                     )
                 )
+                print(
+                    f"[IMU ALIGN] iteration={iteration:02d} "
+                    f"BASE pitch={base_pitch:+.3f} deg | "
+                    f"UPPER pitch={upper_pitch:+.3f} deg | "
+                    f"error={final_error:+.3f} deg"
+                )
 
                 if probe_baseline_error is not None:
                     probe_delta = final_error - probe_baseline_error
+                    print(
+                        f"[IMU ALIGN] direction probe delta="
+                        f"{probe_delta:+.3f} deg after "
+                        f"{self.settings.direction_probe_steps} steps"
+                    )
 
                     if (
                         abs(probe_delta)
