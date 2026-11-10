@@ -301,12 +301,12 @@ LONG_EXPOSURE_ANALOGUE_GAIN = 2.0
 FINAL_CAPTURE_MODE = "sequence"
 FINAL_SEQUENCE_DIRECTORY = "data/images/final_sequence"
 FINAL_SUBEXPOSURE_SECONDS = 10.0
-FINAL_FRAME_COUNT = 18
+FINAL_FRAME_COUNT = 3
 
 # Start long exposures immediately after the initial target solve.
 PIPELINED_CAPTURE_ENABLED = True
 PIPELINED_EXPOSURE_SECONDS = 110.0
-PIPELINED_FRAME_COUNT = 17
+PIPELINED_FRAME_COUNT = 3
 # True: the last exposure has no solve/correction running alongside it.
 PIPELINED_SKIP_FINAL_CORRECTION = True
 EXIT_AFTER_CAPTURE = True
