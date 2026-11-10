@@ -305,7 +305,7 @@ FINAL_FRAME_COUNT = 3
 
 # Start long exposures immediately after the initial target solve.
 PIPELINED_CAPTURE_ENABLED = True
-PIPELINED_EXPOSURE_SECONDS = 110.0
+PIPELINED_EXPOSURE_SECONDS = 30.0
 PIPELINED_FRAME_COUNT = 3
 # True: the last exposure has no solve/correction running alongside it.
 PIPELINED_SKIP_FINAL_CORRECTION = True
@@ -338,7 +338,7 @@ PLATE_SCALE_HIGH = 30.0
 PLATE_DOWNSAMPLE = 4
 
 # solve-field 최대 실행 대기 시간
-PLATE_SOLVE_TIMEOUT = 60.0
+PLATE_SOLVE_TIMEOUT = 25.0
 
 
 # =========================================================
