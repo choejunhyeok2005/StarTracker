@@ -1,0 +1,10 @@
+{
+  "simulation_only": true,
+  "duration_s": 60,
+  "motor_response_fraction": 0.85,
+  "disturbance_time_s": 20,
+  "final_error": {
+    "alt_deg": 0.009218749999689635,
+    "az_deg": 0.009687499999358806
+  }
+}

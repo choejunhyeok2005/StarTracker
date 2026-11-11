@@ -1,0 +1,9 @@
+astropy
+bleak
+numpy
+pynmea2
+pyserial
+smbus2
+RPLCD
+Flask
+opencv-python

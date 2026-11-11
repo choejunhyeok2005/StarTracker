@@ -1,0 +1,11 @@
+{
+  "simulation_only": true,
+  "duration_s": 80,
+  "disturbance_s": 30,
+  "disturbance_alt_deg": -0.7,
+  "final_measured_alt_error_deg": 0.14846883076858575,
+  "final_physical_alt_error_deg": 0.14520833333369154,
+  "filter_mode": "kalman",
+  "estimated_gyro_bias_dps": 0.12027701611474059,
+  "az_source": "step_estimate_not_IMU"
+}

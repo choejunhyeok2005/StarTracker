@@ -1,6 +1,8 @@
 import unittest
 from dataclasses import replace
 
+import config
+
 from controllers.imu_leveling_controller import (
     AlignmentSettings,
     IMUAlignmentError,
@@ -138,7 +140,10 @@ class IMULevelingStableReadTests(unittest.TestCase):
         self.assertEqual(settings.tolerance_deg, 0.2)
         self.assertEqual(
             settings.max_relative_travel_steps,
-            round(15.0 * 960.0),
+            round(
+                config.IMU_MAX_RELATIVE_TRAVEL_DEG
+                * config.STEPS_PER_DEGREE
+            ),
         )
 
     def test_already_aligned_requires_three_stable_reads_without_movement(self):

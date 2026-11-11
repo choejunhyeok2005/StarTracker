@@ -34,6 +34,7 @@ class MotorDriver:
         # 수동 제어 시 두 축이 각각 독립적으로 작동한다.
         self._alt_lock = threading.Lock()
         self._az_lock = threading.Lock()
+        self._stop_event = threading.Event()
 
         self._configured_pins: list[int] = []
 
@@ -45,6 +46,8 @@ class MotorDriver:
 
         if self.initialized:
             return
+
+        self._stop_event.clear()
 
         GPIO.setwarnings(False)
         GPIO.setmode(GPIO.BCM)
@@ -370,6 +373,9 @@ class MotorDriver:
 
             for _ in range(steps):
 
+                if self._stop_event.is_set():
+                    break
+
                 self._pulse(
                     step_pin=step_pin,
                     pulse_delay=pulse_delay,
@@ -461,6 +467,9 @@ class MotorDriver:
 
                 for _ in range(total_ticks):
 
+                    if self._stop_event.is_set():
+                        break
+
                     pulse_alt = False
                     pulse_az = False
 
@@ -532,46 +541,50 @@ class MotorDriver:
     # Cleanup
     # =====================================================
 
-    def cleanup(self) -> None:
+    def resume(self) -> None:
+        """Re-arm the driver after a session stop."""
+
+        if not self.initialized:
+            return
+
+        self._stop_event.clear()
+        self.enable()
+
+    def stop(self) -> None:
+        """Stop immediately and leave STEP/DIR outputs inactive."""
+
+        self._stop_event.set()
 
         if not self.initialized:
             return
 
         self.disable()
 
-        # STEP과 DIR을 LOW로 정리
         for pin in (
             config.MOTOR_BASE_STEP_PIN,
             config.MOTOR_BASE_DIR_PIN,
             config.MOTOR_MOUNT_STEP_PIN,
             config.MOTOR_MOUNT_DIR_PIN,
         ):
-
             try:
                 GPIO.output(pin, GPIO.LOW)
-
             except Exception:
                 pass
 
+    def cleanup(self) -> None:
+
+        if not self.initialized:
+            return
+
+        self.stop()
+
         time.sleep(0.05)
 
-        try:
-
-            GPIO.cleanup(
-                self._configured_pins
-            )
-
-        except Exception as error:
-
-            print(
-                f"[MotorDriver] GPIO Cleanup Warning: "
-                f"{error}"
-            )
-
-        self._configured_pins.clear()
+        # Keep motor pins configured as LOW outputs.  Releasing them with
+        # GPIO.cleanup() can leave STEP/DIR floating and cause false pulses.
         self.initialized = False
 
-        print("[MotorDriver] GPIO Cleanup Complete")
+        print("[MotorDriver] GPIO Safe Stop Complete")
 
 
         

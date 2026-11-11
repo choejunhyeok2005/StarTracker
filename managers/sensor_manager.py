@@ -68,7 +68,7 @@ class SensorManager:
 
         self._data_lock = threading.Lock()
 
-        # 유효한 GNSS Fix를 얻으면 set
+        # 설정된 최소 위성 수를 얻으면 set
         self._fix_event = threading.Event()
 
         # 유효한 RMC UTC를 얻으면 set
@@ -233,22 +233,26 @@ class SensorManager:
                 self.fix_quality = fix_quality
                 self.satellites = satellites
 
-                if fix_quality > 0:
-
-                    latitude = float(message.latitude)
-                    longitude = float(message.longitude)
-
+                if fix_quality > 0 and satellites >= config.GNSS_MIN_SATELLITES:
                     try:
-                        altitude = float(message.altitude)
-
+                        latitude = float(message.latitude)
+                        longitude = float(message.longitude)
                     except (ValueError, TypeError):
-                        altitude = 0.0
+                        latitude = longitude = None
 
-                    self.latitude = latitude
-                    self.longitude = longitude
-                    self.altitude = altitude
+                    if latitude is not None and longitude is not None:
+                        self.latitude = latitude
+                        self.longitude = longitude
 
-                    self._fix_event.set()
+                        try:
+                            self.altitude = float(message.altitude)
+                        except (ValueError, TypeError):
+                            self.altitude = 0.0
+
+                    if latitude is not None and longitude is not None:
+                        self._fix_event.set()
+                else:
+                    self._fix_event.clear()
 
         # --------------------------------------------------
         # RMC
@@ -315,6 +319,51 @@ class SensorManager:
     # Wait For GNSS Fix
     # ==================================================
 
+    def wait_for_position(
+        self,
+        timeout: Optional[float] = None,
+    ) -> bool:
+        """유효한 GNSS 위치 Fix만 기다린다."""
+
+        if timeout is None:
+            timeout = config.GNSS_FIX_TIMEOUT
+
+        print(
+            f"[Sensor] Waiting for GNSS Position "
+            f"(timeout={timeout}s)..."
+        )
+
+        position_success = (
+            self._fix_event.wait(timeout)
+            and self._fix_event.is_set()
+            and self.get_location() is not None
+        )
+
+        if position_success:
+            print("[Sensor] GNSS Position Acquired")
+            return True
+
+        print("[Sensor] GNSS Position Timeout")
+        return False
+
+    def wait_for_utc(
+        self,
+        timeout: Optional[float] = None,
+    ) -> bool:
+        """GNSS 위치 대기와 별도로 유효한 UTC를 기다린다."""
+
+        if timeout is None:
+            timeout = config.GNSS_UTC_TIMEOUT
+
+        utc_success = self._utc_event.wait(timeout) and self.get_utc() is not None
+
+        if utc_success:
+            print("[Sensor] GNSS UTC Acquired")
+            return True
+
+        print("[Sensor] GNSS UTC Timeout")
+        return False
+
     def wait_for_fix(
         self,
         timeout: Optional[float] = None,
@@ -338,22 +387,13 @@ class SensorManager:
         )
 
         deadline = time_module.monotonic() + timeout
-
         position_success = self._fix_event.wait(timeout)
+        if position_success:
+            position_success = self._utc_event.wait(
+                max(0.0, deadline - time_module.monotonic())
+            ) and self._fix_event.is_set() and self.get_location() is not None
 
         if position_success:
-
-            remaining = max(
-                0.0,
-                deadline - time_module.monotonic(),
-            )
-
-            utc_success = self._utc_event.wait(remaining)
-
-            if not utc_success:
-                print("[Sensor] GNSS UTC acquisition timeout")
-                return False
-
             location = self.get_location()
 
             if location is not None:
@@ -381,6 +421,11 @@ class SensorManager:
                     f"[Sensor] Satellites: "
                     f"{self.get_satellites()}"
                 )
+            else:
+                print("[Sensor] Satellite threshold reached without location")
+
+            if self.get_utc() is None:
+                print("[Sensor] GNSS UTC unavailable; using system UTC")
 
             return True
 
