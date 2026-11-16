@@ -1,0 +1,17 @@
+frame,start_s,end_s,stage
+1,0,10,exposure
+1,10,18,solve
+1,18,21.95,settle
+2,21.95,31.95,exposure
+2,31.95,39.95,solve
+2,39.95,40.85,settle
+3,40.85,50.85,exposure
+3,50.85,58.85,solve
+3,58.85,59.65,settle
+4,59.65,69.65,exposure
+4,69.65,77.65,solve
+4,77.65,78.45,settle
+5,78.45,88.45,exposure
+5,88.45,96.45,solve
+5,96.45,97.25,settle
+6,97.25,107.25,exposure

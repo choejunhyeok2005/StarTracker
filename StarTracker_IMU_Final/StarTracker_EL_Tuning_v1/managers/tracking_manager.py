@@ -643,10 +643,8 @@ class TrackingManager:
                         if self.stop_event.is_set():
                             break
                         if not settled:
-                            status = "inter_exposure_settle_timeout"
-                            self.stop_reason = status
-                            print("[Tracking] Pointing did not settle; stopping the exposure sequence.")
-                            break
+                            print(f"[Tracking] Pointing did not settle within {settle_timeout:g}s; "
+                                  f"continuing with exposure {number}.")
                 elif number == count and config.PIPELINED_SKIP_FINAL_CORRECTION:
                     if future is not None:
                         future.result()

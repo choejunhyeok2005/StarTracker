@@ -124,23 +124,56 @@ class SettledCaptureTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in manager.platesolver.solve.call_args_list],
                          saved_paths[:-1])
 
-    def test_solver_failure_and_settle_timeout_preserve_the_first_frame(self):
-        cases = ((False, "inter_exposure_solve_failed"), (True, "inter_exposure_settle_timeout"))
-        for solves, status in cases:
-            with self.subTest(solves=solves):
-                manager, camera, motor, logger = make_runtime_manager()
-                manager._get_observation_time = lambda: 100.0
-                camera.capture_long_exposure = Mock(return_value="first.jpg")
-                manager._solve_exposure = Mock(return_value=solves)
-                manager._wait_for_capture_settle = Mock(return_value=False)
-                with TemporaryDirectory() as directory, patch.object(config, "FINAL_SEQUENCE_DIRECTORY", directory):
-                    manager.pipelined_capture_loop()
-                camera.capture_long_exposure.assert_called_once()
-                self.assertEqual(manager._wait_for_capture_settle.call_count, int(solves))
-                self.assertFalse(manager.capture_completed)
-                self.assertEqual(motor.stop_count, 1)
-                self.assertEqual(logger.finished[-1]["status"], status)
-                self.assertEqual(logger.finished[-1]["final_images"], ["first.jpg"])
+    def test_solver_failure_preserves_the_first_frame(self):
+        manager, camera, motor, logger = make_runtime_manager()
+        manager._get_observation_time = lambda: 100.0
+        camera.capture_long_exposure = Mock(return_value="first.jpg")
+        manager._solve_exposure = Mock(return_value=False)
+        manager._wait_for_capture_settle = Mock()
+        with TemporaryDirectory() as directory, patch.object(config, "FINAL_SEQUENCE_DIRECTORY", directory):
+            manager.pipelined_capture_loop()
+        camera.capture_long_exposure.assert_called_once()
+        manager._wait_for_capture_settle.assert_not_called()
+        self.assertFalse(manager.capture_completed)
+        self.assertEqual(motor.stop_count, 1)
+        self.assertEqual(logger.finished[-1]["status"], "inter_exposure_solve_failed")
+        self.assertEqual(logger.finished[-1]["final_images"], ["first.jpg"])
+
+    def test_settle_timeout_continues_with_next_frame(self):
+        manager, camera, motor, logger = make_runtime_manager()
+        manager._get_observation_time = lambda: 100.0
+        camera.capture_long_exposure = Mock(side_effect=lambda *, filename, exposure_time: filename)
+        manager._solve_exposure = Mock(return_value=True)
+        manager._wait_for_capture_settle = Mock(side_effect=[False, True, True, True, True])
+        with TemporaryDirectory() as directory, patch.object(config, "FINAL_SEQUENCE_DIRECTORY", directory):
+            manager.pipelined_capture_loop()
+        self.assertTrue(manager.capture_completed)
+        self.assertEqual(logger.finished[-1]["status"], "completed")
+        self.assertEqual(len(logger.finished[-1]["final_images"]), 6)
+        self.assertEqual(camera.capture_long_exposure.call_count, 6)
+        self.assertEqual(manager._solve_exposure.call_count, 5)
+        settle = [event["details"] for event in logger.events if event.get("name") == "inter_exposure_settle"]
+        self.assertEqual([(event["after_frame"], event["settled"]) for event in settle],
+                         [(1, False), (2, True), (3, True), (4, True), (5, True)])
+        self.assertEqual(motor.stop_count, 1)
+
+    def test_stopping_during_settle_does_not_start_next_frame(self):
+        manager, camera, motor, logger = make_runtime_manager()
+        manager._get_observation_time = lambda: 100.0
+        camera.capture_long_exposure = Mock(return_value="first.jpg")
+        manager._solve_exposure = Mock(return_value=True)
+
+        def cancel(*args):
+            manager.stop_event.set()
+            return False
+
+        manager._wait_for_capture_settle = Mock(side_effect=cancel)
+        with TemporaryDirectory() as directory, patch.object(config, "FINAL_SEQUENCE_DIRECTORY", directory):
+            manager.pipelined_capture_loop()
+        camera.capture_long_exposure.assert_called_once()
+        self.assertFalse(manager.capture_completed)
+        self.assertEqual(logger.finished[-1]["status"], "capture_cancelled")
+        self.assertEqual(logger.finished[-1]["final_images"], ["first.jpg"])
 
     def test_settle_requires_consecutive_valid_samples_on_both_axes(self):
         manager, motor_camera, motor, logger = make_runtime_manager()
