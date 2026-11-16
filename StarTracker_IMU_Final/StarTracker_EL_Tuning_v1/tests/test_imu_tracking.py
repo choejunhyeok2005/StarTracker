@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import config
 from controllers.motor_controller import MotorController, MotorMode
+from controllers.position_pid import PositionPID
 from hardware.imu import AltitudeSample, IMUAltitudeSensor, IMUReadError
 from simulate_control import SimulatedMount
 from simulate_imu_control import SimulatedIMU, run_demo
@@ -44,6 +45,45 @@ class IMUFeedbackTests(unittest.TestCase):
         # AZ remains a step estimate, so deliberately lost steps are observable
         # only in the simulated plant, not fed back into the AZ controller.
         self.assertGreater(self.motor.current_az, self.plant.az)
+
+    def test_pid_keeps_motion_state_between_exact_thresholds(self):
+        for sign in (1, -1):
+            with self.subTest(sign=sign):
+                pid = PositionPID(**config.IMU_TRACKING_PID)
+                for error, stopped in (
+                    (.150, True), (.151, False), (.150, False),
+                    (.140, False), (.135, True), (.140, True),
+                    (.150, True), (.151, False),
+                ):
+                    speed = pid.update(sign * error, 0.0, config.TRACKING_INTERVAL)
+                    self.assertEqual(pid.stopped, stopped, msg=f"error={sign * error}")
+                    self.assertEqual(speed == 0.0, stopped)
+                pid.reset()
+                self.assertEqual(pid.update(sign * .140, 0.0, config.TRACKING_INTERVAL), 0.0)
+                self.assertTrue(pid.stopped)
+
+    def test_fractional_steps_reset_when_pid_stops(self):
+        controller = self.motor.imu_feedback
+        # Keep the sensor angle fixed so we can exercise both states at 0.14 deg.
+        controller.position = Mock(return_value=40.0)
+        motor = SimpleNamespace(target_alt=40.0, step_angle=1.0)
+
+        def update(error):
+            self.plant.time += config.TRACKING_INTERVAL
+            motor.target_alt = 40.0 + error
+            return controller.steps(motor)
+
+        self.assertGreater(update(.16)[1], 0)
+        previous_remainder = controller.remainder
+        self.assertGreater(previous_remainder, 0)
+        self.assertGreater(update(.14)[1], 0)
+        self.assertGreater(controller.remainder, previous_remainder)
+        self.assertEqual(update(.13), (0, 0.0))
+        self.assertTrue(controller.pid.stopped)
+        self.assertEqual(controller.remainder, 0.0)
+        self.assertEqual(update(.14), (0, 0.0))
+        self.assertEqual(controller.remainder, 0.0)
+        self.assertGreater(update(.16)[1], 0)
 
     def test_no_commanded_el_steps_are_added_to_measurement(self):
         self.plant.efficiency = 0

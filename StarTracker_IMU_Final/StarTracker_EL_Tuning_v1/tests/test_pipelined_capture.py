@@ -43,7 +43,8 @@ class PipelinedCaptureTests(unittest.TestCase):
 
         camera.capture_long_exposure = capture
         with TemporaryDirectory() as directory, patch.multiple(
-            config, PIPELINED_FRAME_COUNT=3, PIPELINED_EXPOSURE_SECONDS=110,
+            config, PIPELINED_WAIT_FOR_SETTLE=False, PIPELINED_FRAME_COUNT=3,
+            PIPELINED_EXPOSURE_SECONDS=110,
             PIPELINED_SKIP_FINAL_CORRECTION=True, FINAL_SEQUENCE_DIRECTORY=directory,
         ):
             manager.pipelined_capture_loop()
@@ -63,7 +64,8 @@ class PipelinedCaptureTests(unittest.TestCase):
         camera.capture_long_exposure = Mock(side_effect=["first.jpg", OSError("disk full")])
         manager._solve_exposure = Mock()
         with TemporaryDirectory() as directory, patch.multiple(
-            config, PIPELINED_FRAME_COUNT=3, FINAL_SEQUENCE_DIRECTORY=directory,
+            config, PIPELINED_WAIT_FOR_SETTLE=False, PIPELINED_FRAME_COUNT=3,
+            FINAL_SEQUENCE_DIRECTORY=directory,
         ):
             manager.pipelined_capture_loop()
         self.assertEqual(logger.finished[-1]["status"], "final_capture_failed")
@@ -82,6 +84,87 @@ class PipelinedCaptureTests(unittest.TestCase):
         motor.apply_position_offset = Mock()
         manager._solve_exposure(("first.jpg", 100, 1))
         motor.apply_position_offset.assert_not_called()
+
+
+class SettledCaptureTests(unittest.TestCase):
+    def test_waits_between_six_exposures(self):
+        manager, camera, motor, logger = make_runtime_manager()
+        manager._get_observation_time = lambda: 100.0
+        order = []
+
+        manager.target_ra, manager.target_dec = 1, 2
+        manager.astronomy = Mock()
+        manager.astronomy.radec_to_altaz.return_value = (40.0, 100.0)
+
+        def capture(*, filename, exposure_time):
+            order.append(("photo", exposure_time))
+            Path(filename).write_bytes(b"test-image")
+            order.append("saved")
+            return filename
+
+        def solve(path):
+            self.assertTrue(Path(path).is_file())
+            order.append("solve")
+            return {"ra": 1, "dec": 2}
+
+        manager.platesolver = Mock()
+        manager.platesolver.solve.side_effect = solve
+        motor.apply_position_offset = Mock(side_effect=lambda *args: order.append("correct"))
+        manager._wait_for_capture_settle = Mock(side_effect=lambda *args: order.append(("settle", args)) or True)
+        camera.capture_long_exposure = capture
+        with TemporaryDirectory() as directory, patch.object(config, "FINAL_SEQUENCE_DIRECTORY", directory):
+            manager.pipelined_capture_loop()
+        exposure = [("photo", 10.0), "saved"]
+        correction = ["solve", "correct", ("settle", (30.0, 5))]
+        self.assertEqual(order, (exposure + correction) * 5 + exposure)
+        self.assertTrue(manager.capture_completed)
+        self.assertEqual(motor.stop_count, 1)
+        saved_paths = logger.finished[-1]["final_images"]
+        self.assertEqual(len(saved_paths), 6)
+        self.assertEqual([call.args[0] for call in manager.platesolver.solve.call_args_list],
+                         saved_paths[:-1])
+
+    def test_solver_failure_and_settle_timeout_preserve_the_first_frame(self):
+        cases = ((False, "inter_exposure_solve_failed"), (True, "inter_exposure_settle_timeout"))
+        for solves, status in cases:
+            with self.subTest(solves=solves):
+                manager, camera, motor, logger = make_runtime_manager()
+                manager._get_observation_time = lambda: 100.0
+                camera.capture_long_exposure = Mock(return_value="first.jpg")
+                manager._solve_exposure = Mock(return_value=solves)
+                manager._wait_for_capture_settle = Mock(return_value=False)
+                with TemporaryDirectory() as directory, patch.object(config, "FINAL_SEQUENCE_DIRECTORY", directory):
+                    manager.pipelined_capture_loop()
+                camera.capture_long_exposure.assert_called_once()
+                self.assertEqual(manager._wait_for_capture_settle.call_count, int(solves))
+                self.assertFalse(manager.capture_completed)
+                self.assertEqual(motor.stop_count, 1)
+                self.assertEqual(logger.finished[-1]["status"], status)
+                self.assertEqual(logger.finished[-1]["final_images"], ["first.jpg"])
+
+    def test_settle_requires_consecutive_valid_samples_on_both_axes(self):
+        manager, motor_camera, motor, logger = make_runtime_manager()
+        motor.current_alt, motor.current_az = 40.0, 359.99
+        result = []
+        waiter = threading.Thread(target=lambda: result.append(manager._wait_for_capture_settle(2.0, 5)))
+        waiter.start()
+        try:
+            self.assertTrue(manager._capture_settling.wait(1))
+            for _ in range(4):
+                manager._record_capture_settle_sample(40.0, 0.01)
+            self.assertEqual(manager._capture_settle_streak, 4)
+            manager._record_capture_settle_sample(40.0, 0.1)
+            self.assertEqual(manager._capture_settle_streak, 0)
+            manager._record_capture_settle_sample(40.0, 0.01)
+            manager._record_capture_settle_sample(40.0, 0.01, fresh=False)
+            self.assertEqual(manager._capture_settle_streak, 0)
+            for _ in range(5):
+                manager._record_capture_settle_sample(40.0, 0.01)
+            waiter.join(1)
+            self.assertEqual(result, [True])
+        finally:
+            manager.stop_event.set()
+            waiter.join(2)
 
 
 if __name__ == "__main__":

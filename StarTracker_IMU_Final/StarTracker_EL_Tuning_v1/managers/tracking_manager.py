@@ -109,6 +109,9 @@ class TrackingManager:
 
         # 스레드 종료 및 대기 제어
         self.stop_event = threading.Event()
+        self._capture_settling = threading.Event()
+        self._capture_settle_condition = threading.Condition()
+        self._capture_settle_streak = 0
 
         # 최초 Plate Solving 중의 시작 작업 취소 제어
         self._start_cancel_event = threading.Event()
@@ -466,7 +469,14 @@ class TrackingManager:
                     az=target_az,
                 )
 
+                sample_settle = self._capture_settling.is_set()
+                imu = self.motor.imu_feedback if sample_settle else None
+                prior_imu_time = imu.last_sample_time if imu is not None else None
                 self.motor.update()
+                if sample_settle:
+                    fresh = (imu is None or (imu.recovery_started is None and
+                             imu.last_sample_time is not None and imu.last_sample_time != prior_imu_time))
+                    self._record_capture_settle_sample(target_alt, target_az, fresh=fresh)
 
             except Exception as error:
                 print(f"[Tracking] Tracking Loop Error: {error}")
@@ -505,16 +515,48 @@ class TrackingManager:
         self._safe_log(self.logger.record_event, name="imu_deadline_recovery",
                        timestamp_utc=self._current_time_iso(), details=details)
 
+    def _record_capture_settle_sample(self, target_alt, target_az, *, fresh=True):
+        """Count only fresh tracking updates after a correction."""
+        alt_tolerance = (config.IMU_TRACKING_PID["tolerance"]
+                         if config.IMU_TRACKING_ENABLED else config.ANGLE_TOLERANCE)
+        alt_error = abs(target_alt - self.motor.current_alt)
+        az_error = abs(self._shortest_azimuth_error(target_az, self.motor.current_az))
+        with self._capture_settle_condition:
+            if not self._capture_settling.is_set():
+                return
+            if fresh and alt_error <= alt_tolerance and az_error <= config.ANGLE_TOLERANCE:
+                self._capture_settle_streak += 1
+            else:
+                self._capture_settle_streak = 0
+            self._capture_settle_condition.notify()
+
+    def _wait_for_capture_settle(self, timeout, required_samples):
+        deadline = time.monotonic() + timeout
+        with self._capture_settle_condition:
+            self._capture_settle_streak = 0
+            self._capture_settling.set()
+            try:
+                while not self.stop_event.is_set():
+                    if self._capture_settle_streak >= required_samples:
+                        return True
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._capture_settle_condition.wait(timeout=min(0.1, remaining))
+                return False
+            finally:
+                self._capture_settling.clear()
+
     def _solve_exposure(self, frame):
-        """Solve a saved exposure while the camera captures the next one."""
+        """Correct from a saved exposure and report whether the offset was applied."""
         path, observation_time, frame_number = frame
         try:
             result = self.platesolver.solve(path)
             if self.stop_event.is_set():
-                return
+                return False
             if result is None:
                 self._record_correction_failure()
-                return
+                return False
             measured_alt, measured_az = self.astronomy.radec_to_altaz(
                 ra=float(result["ra"]), dec=float(result["dec"]),
                 observation_time=observation_time,
@@ -529,7 +571,7 @@ class TrackingManager:
             # the live position rather than resetting it to that old position.
             with self._state_lock:
                 if self.stop_event.is_set():
-                    return
+                    return False
                 self.motor.apply_position_offset(-alt_error, -az_error)
                 self.correction_count += 1
                 self.consecutive_correction_failures = 0
@@ -546,6 +588,7 @@ class TrackingManager:
             })
             print(f"[Tracking] Exposure {frame_number} corrected: "
                   f"ALT={alt_error:.4f}, AZ={az_error:.4f} deg")
+            return True
         except Exception as error:
             self._safe_log(
                 self.logger.record_event, name="exposure_correction_error",
@@ -553,19 +596,26 @@ class TrackingManager:
                 details={"image_path": path, "error": str(error)},
             )
             self._record_correction_failure()
+            return False
 
     def pipelined_capture_loop(self):
-        """Capture continuously; solve the previous frame in one worker."""
+        """Capture a sequence with correction between or during exposures."""
         paths = []
         status = "completed"
         future = None
         previous_frame = None
-        worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ExposureSolve")
+        wait_for_settle = config.PIPELINED_WAIT_FOR_SETTLE
+        worker = (None if wait_for_settle else
+                  ThreadPoolExecutor(max_workers=1, thread_name_prefix="ExposureSolve"))
         try:
             count = int(config.PIPELINED_FRAME_COUNT)
             exposure = float(config.PIPELINED_EXPOSURE_SECONDS)
             if count < 1 or exposure <= 0:
                 raise ValueError("Exposure time and frame count must be positive.")
+            settle_timeout = config.PIPELINED_SETTLE_TIMEOUT_SECONDS
+            required_samples = config.PIPELINED_SETTLE_SAMPLES
+            if wait_for_settle and (settle_timeout <= 0 or required_samples < 1):
+                raise ValueError("Exposure settle time and sample count must be positive.")
             directory = Path(config.FINAL_SEQUENCE_DIRECTORY)
             directory.mkdir(parents=True, exist_ok=True)
             sequence_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
@@ -573,9 +623,31 @@ class TrackingManager:
             for number in range(1, count + 1):
                 if self.stop_event.is_set():
                     break
-                # Do not queue stale frames if solving takes longer than an
-                # exposure. The next available slot uses the latest frame.
-                if number == count and config.PIPELINED_SKIP_FINAL_CORRECTION:
+                if wait_for_settle:
+                    if previous_frame is not None:
+                        solved = self._solve_exposure(previous_frame)
+                        if self.stop_event.is_set():
+                            break
+                        if not solved:
+                            status = "inter_exposure_solve_failed"
+                            self.stop_reason = status
+                            break
+                        print(f"[Tracking] Waiting for pointing to settle after frame {number - 1}")
+                        settled = self._wait_for_capture_settle(settle_timeout, required_samples)
+                        self._safe_log(
+                            self.logger.record_event, name="inter_exposure_settle",
+                            timestamp_utc=self._current_time_iso(),
+                            details={"after_frame": number - 1, "settled": settled,
+                                     "required_samples": required_samples},
+                        )
+                        if self.stop_event.is_set():
+                            break
+                        if not settled:
+                            status = "inter_exposure_settle_timeout"
+                            self.stop_reason = status
+                            print("[Tracking] Pointing did not settle; stopping the exposure sequence.")
+                            break
+                elif number == count and config.PIPELINED_SKIP_FINAL_CORRECTION:
                     if future is not None:
                         future.result()
                     if self.stop_event.is_set():
@@ -609,7 +681,7 @@ class TrackingManager:
                 future.result()
             if self.stop_event.is_set():
                 status = "capture_cancelled"
-            else:
+            elif status == "completed":
                 self.capture_completed = True
                 self.stop_reason = "completed"
         except Exception as error:
@@ -622,7 +694,8 @@ class TrackingManager:
             self.stop_event.set()
             self.is_tracking = False
             self.motor.stop()
-            worker.shutdown(wait=True, cancel_futures=True)
+            if worker is not None:
+                worker.shutdown(wait=True, cancel_futures=True)
             self._safe_log(self.logger.finish_session, status=status,
                            ended_at_utc=self._current_time_iso(), final_images=paths)
             self.state.set_state(SystemState.PREVIEW)

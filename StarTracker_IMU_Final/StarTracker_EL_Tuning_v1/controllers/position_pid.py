@@ -7,7 +7,8 @@ def angular_error(target, actual):
 
 
 class PositionPID:
-    def __init__(self, kp, ki, kd, max_speed, max_acceleration, tolerance):
+    def __init__(self, kp, ki, kd, max_speed, max_acceleration, tolerance,
+                 *, stop_tolerance=None):
         values = (kp, ki, kd, max_speed, max_acceleration, tolerance)
         if not all(math.isfinite(v) and v >= 0 for v in values):
             raise ValueError("PID settings must be finite and nonnegative.")
@@ -15,13 +16,18 @@ class PositionPID:
             raise ValueError("Speed and acceleration must be positive.")
         self.kp, self.ki, self.kd = kp, ki, kd
         self.max_speed, self.max_acceleration = max_speed, max_acceleration
+        if stop_tolerance is not None and not 0 <= stop_tolerance <= tolerance:
+            raise ValueError("PID stop tolerance must be between zero and the restart tolerance.")
+        # By default both thresholds follow tolerance, as in the single-threshold PID.
         self.tolerance = tolerance
+        self.stop_tolerance = stop_tolerance
         self.reset()
 
     def reset(self):
         self.integral = 0.0
         self.previous_measurement = None
         self.speed = 0.0
+        self.stopped = True
 
     def update(self, error, measurement, dt, circular=False):
         if not all(math.isfinite(v) for v in (error, measurement, dt)) or dt <= 0:
@@ -30,7 +36,10 @@ class PositionPID:
             angular_error(measurement, self.previous_measurement) if circular
             else measurement - self.previous_measurement)
         self.previous_measurement = measurement
-        if abs(error) <= self.tolerance:
+        stop_tolerance = self.tolerance if self.stop_tolerance is None else self.stop_tolerance
+        threshold = self.tolerance if self.stopped else stop_tolerance
+        self.stopped = abs(error) <= threshold
+        if self.stopped:
             self.integral = self.speed = 0.0
             return 0.0
         candidate = self.integral + error * dt

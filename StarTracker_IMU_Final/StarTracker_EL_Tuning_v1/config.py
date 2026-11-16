@@ -165,10 +165,11 @@ IMU_GYRO_CALIBRATION_SETTLE = 0.25
 IMU_GYRO_CALIBRATION_MAX_STD_DPS = 0.30
 IMU_GYRO_CALIBRATION_MAX_TILT_RANGE = 0.80  # prior stationary trial override
 IMU_GYRO_CALIBRATION_MAX_BIAS_DPS = 5.0
-# Provisional hardware trial gains from the latest completed 3-cycle run.
-# See TUNING_STATUS.md; repeated stall behavior means these are not certified.
-IMU_TRACKING_PID = dict(kp=0.4, ki=0.002, kd=0.1, max_speed=0.05,
-                        max_acceleration=0.20, tolerance=0.15)
+# MATLAB trial gains selected for fewer IMU deadline resets and lower error.
+# EL stops at stop_tolerance and resumes above tolerance (degrees).
+IMU_TRACKING_PID = dict(kp=0.315, ki=0.005, kd=0.125, max_speed=0.05,
+                        max_acceleration=0.20, tolerance=0.150,
+                        stop_tolerance=0.135)
 IMU_TRACKING_FILTER_TAU = 0.25  # seconds; first-order low-pass on gravity tilt
 IMU_TRACKING_MAX_READ_SECONDS = 0.15
 # Tracking-only recovery: withhold both axes until fresh readings agree.
@@ -305,10 +306,14 @@ FINAL_FRAME_COUNT = 3
 
 # Start long exposures immediately after the initial target solve.
 PIPELINED_CAPTURE_ENABLED = True
-PIPELINED_EXPOSURE_SECONDS = 30.0
-PIPELINED_FRAME_COUNT = 3
+PIPELINED_EXPOSURE_SECONDS = 10.0
+PIPELINED_FRAME_COUNT = 6
 # True: the last exposure has no solve/correction running alongside it.
 PIPELINED_SKIP_FINAL_CORRECTION = True
+# Solve the previous frame and wait for pointing to settle before the next exposure.
+PIPELINED_WAIT_FOR_SETTLE = True
+PIPELINED_SETTLE_TIMEOUT_SECONDS = 30.0
+PIPELINED_SETTLE_SAMPLES = 5
 EXIT_AFTER_CAPTURE = True
 
 # 각 장노출 프레임이 저장된 뒤 다음 프레임을 시작하기 전 대기시간.
@@ -338,7 +343,7 @@ PLATE_SCALE_HIGH = 30.0
 PLATE_DOWNSAMPLE = 4
 
 # solve-field 최대 실행 대기 시간
-PLATE_SOLVE_TIMEOUT = 25.0
+PLATE_SOLVE_TIMEOUT = 20.0
 
 
 # =========================================================

@@ -182,7 +182,7 @@ class IMUTrackingController:
                                  config.MAX_STEP_PER_UPDATE * motor.step_angle / dt,
                                  motor.step_angle / (2 * config.MOTOR_PULSE_DELAY))
         speed = self.pid.update(error, alt, dt)
-        if abs(error) <= self.pid.tolerance:
+        if self.pid.stopped:
             self.remainder = 0.0
         demand = speed * dt / motor.step_angle + self.remainder
         steps = max(-config.MAX_STEP_PER_UPDATE, min(config.MAX_STEP_PER_UPDATE, math.trunc(demand)))
