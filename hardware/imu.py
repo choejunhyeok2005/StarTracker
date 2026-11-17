@@ -47,31 +47,44 @@ class IMUAltitudeSensor:
         self.pair, self.clock = pair, clock
         self.sleep = sleep
 
-    def read(self):
+    def read(self, *, enforce_deadline=True):
         import config
         started = self.clock()
-        gyro_rate = None
-        if config.IMU_FILTER_MODE == "kalman":
-            xyz, gyro_xyz = self.pair.read_motion(self.pair.upper_address)
-            if config.IMU_GYRO_X_SIGN not in (-1, 1):
-                raise IMUReadError("IMU_GYRO_X_SIGN must be -1 or +1")
-            gyro_rate = config.IMU_GYRO_X_SIGN * gyro_xyz[0] / 131.0
-            if not all(math.isfinite(v) and abs(v / 131.0) <= config.IMU_GYRO_MAX_RATE_DPS
-                       for v in gyro_xyz):
-                raise IMUReadError("Invalid or excessive IMU gyro rate")
-        else:
-            xyz = self.pair.read_acceleration(self.pair.upper_address)
-        if self.clock() - started > config.IMU_TRACKING_MAX_READ_SECONDS:
-            raise IMUReadError("IMU read exceeded control deadline")
-        if not all(math.isfinite(v) for v in xyz):
-            raise IMUReadError("Nonfinite IMU acceleration")
-        gravity = math.sqrt(sum(v * v for v in xyz)) / 16384.0
-        if not config.IMU_TRACKING_MIN_GRAVITY_G <= gravity <= config.IMU_TRACKING_MAX_GRAVITY_G:
-            raise IMUReadError("IMU acceleration is inconsistent with stationary gravity")
-        if math.hypot(xyz[1], xyz[2]) / 16384.0 < 0.25:
-            raise IMUReadError("IMU Y-Z gravity projection is too small for EL estimation")
-        angle = acceleration_to_pitch(*xyz) - config.IMU_UPPER_PITCH_OFFSET_DEG
-        return AltitudeSample(angle, started, gyro_rate)
+        retries = config.IMU_TRACKING_GRAVITY_RETRIES
+        last_gravity = float("nan")
+
+        for attempt in range(retries):
+            gyro_rate = None
+            if config.IMU_FILTER_MODE == "kalman":
+                xyz, gyro_xyz = self.pair.read_motion(self.pair.upper_address)
+                if config.IMU_GYRO_X_SIGN not in (-1, 1):
+                    raise IMUReadError("IMU_GYRO_X_SIGN must be -1 or +1")
+                gyro_rate = config.IMU_GYRO_X_SIGN * gyro_xyz[0] / 131.0
+                if not all(math.isfinite(v) and abs(v / 131.0) <= config.IMU_GYRO_MAX_RATE_DPS
+                           for v in gyro_xyz):
+                    raise IMUReadError("Invalid or excessive IMU gyro rate")
+            else:
+                xyz = self.pair.read_acceleration(self.pair.upper_address)
+
+            if not all(math.isfinite(v) for v in xyz):
+                raise IMUReadError("Nonfinite IMU acceleration")
+            last_gravity = math.sqrt(sum(v * v for v in xyz)) / 16384.0
+            gravity_valid = config.IMU_TRACKING_MIN_GRAVITY_G <= last_gravity <= config.IMU_TRACKING_MAX_GRAVITY_G
+            projection_valid = math.hypot(xyz[1], xyz[2]) / 16384.0 >= 0.25
+            if gravity_valid and projection_valid:
+                read_limit = (config.IMU_TRACKING_MAX_READ_SECONDS if enforce_deadline
+                              else config.IMU_GYRO_CALIBRATION_MAX_READ_SECONDS)
+                if self.clock() - started > read_limit:
+                    raise IMUReadError("IMU read exceeded control deadline")
+                angle = acceleration_to_pitch(*xyz) - config.IMU_UPPER_PITCH_OFFSET_DEG
+                return AltitudeSample(angle, started, gyro_rate)
+
+            if attempt + 1 < retries:
+                self.sleep(config.IMU_TRACKING_GRAVITY_RETRY_INTERVAL)
+
+        if not (config.IMU_TRACKING_MIN_GRAVITY_G <= last_gravity <= config.IMU_TRACKING_MAX_GRAVITY_G):
+            raise IMUReadError("IMU acceleration is inconsistent with stationary gravity after retries")
+        raise IMUReadError("IMU Y-Z gravity projection is too small for EL estimation after retries")
 
     def calibrate(self):
         """Estimate startup gyro X bias while motor commands are idle."""
@@ -83,7 +96,9 @@ class IMUAltitudeSensor:
         self.sleep(config.IMU_GYRO_CALIBRATION_SETTLE)
         samples = []
         for index in range(count):
-            sample = self.read()
+            # Startup calibration runs with motors idle; keep the tracking
+            # deadline strict while allowing the I2C adapter its timeout here.
+            sample = self.read(enforce_deadline=False)
             if sample.gyro_rate is None:
                 raise IMUReadError("Gyro sample required for calibration")
             if samples and sample.timestamp <= samples[-1].timestamp:
@@ -94,10 +109,17 @@ class IMUAltitudeSensor:
         rates = [s.gyro_rate for s in samples]
         tilts = [(s.angle - samples[0].angle + 180) % 360 - 180 for s in samples]
         bias, std = statistics.mean(rates), statistics.stdev(rates)
+        tilt_range = max(tilts) - min(tilts)
         if (std > config.IMU_GYRO_CALIBRATION_MAX_STD_DPS
-                or max(tilts) - min(tilts) > config.IMU_GYRO_CALIBRATION_MAX_TILT_RANGE
+                or tilt_range > config.IMU_GYRO_CALIBRATION_MAX_TILT_RANGE
                 or abs(bias) > config.IMU_GYRO_CALIBRATION_MAX_BIAS_DPS):
-            raise IMUReadError("Mount moved or gyro bias was excessive during calibration")
+            raise IMUReadError(
+                "Gyro calibration rejected: "
+                f"bias={bias:+.3f} deg/s (limit {config.IMU_GYRO_CALIBRATION_MAX_BIAS_DPS:.3f}), "
+                f"std={std:.3f} deg/s (limit {config.IMU_GYRO_CALIBRATION_MAX_STD_DPS:.3f}), "
+                f"tilt_range={tilt_range:.3f} deg "
+                f"(limit {config.IMU_GYRO_CALIBRATION_MAX_TILT_RANGE:.3f})"
+            )
         print(f"[IMU] Gyro X bias={bias:+.5f} deg/s, std={std:.5f}")
         return GyroCalibration(bias, std, count)
 

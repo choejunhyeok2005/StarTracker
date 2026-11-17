@@ -160,11 +160,14 @@ IMU_GYRO_X_SIGN = 1  # gyro X must increase with atan2(accel Y, accel Z)
 IMU_GYRO_MAX_RATE_DPS = 100.0  # saturation/large unexpected motion rejection
 IMU_GYRO_CALIBRATION_SAMPLES = 100
 IMU_GYRO_CALIBRATION_INTERVAL = 0.01
+IMU_GYRO_CALIBRATION_MAX_READ_SECONDS = 1.25  # startup only; tracking keeps 150 ms
 IMU_GYRO_CALIBRATION_SETTLE = 0.25
 IMU_GYRO_CALIBRATION_MAX_STD_DPS = 0.30
-IMU_GYRO_CALIBRATION_MAX_TILT_RANGE = 0.50
+IMU_GYRO_CALIBRATION_MAX_TILT_RANGE = 0.80  # prior stationary trial override
 IMU_GYRO_CALIBRATION_MAX_BIAS_DPS = 5.0
-IMU_TRACKING_PID = dict(kp=0.8, ki=0.0, kd=0.0, max_speed=0.10,
+# Provisional hardware trial gains from the latest completed 3-cycle run.
+# See TUNING_STATUS.md; repeated stall behavior means these are not certified.
+IMU_TRACKING_PID = dict(kp=0.4, ki=0.002, kd=0.1, max_speed=0.05,
                         max_acceleration=0.20, tolerance=0.15)
 IMU_TRACKING_FILTER_TAU = 0.25  # seconds; first-order low-pass on gravity tilt
 IMU_TRACKING_MAX_READ_SECONDS = 0.15
@@ -173,6 +176,8 @@ IMU_TRACKING_MAX_JUMP_DEG = 5.0
 IMU_TRACKING_LIMIT_MARGIN_DEG = 1.0  # reject gross limit violation despite noise
 IMU_TRACKING_MIN_GRAVITY_G = 0.75
 IMU_TRACKING_MAX_GRAVITY_G = 1.25
+IMU_TRACKING_GRAVITY_RETRIES = 3
+IMU_TRACKING_GRAVITY_RETRY_INTERVAL = 0.005
 IMU_TRACKING_STALL_SECONDS = 8.0
 IMU_TRACKING_STALL_COMMAND_DEG = 0.30
 IMU_TRACKING_STALL_MOVEMENT_DEG = 0.05
@@ -204,7 +209,7 @@ IMU_SETTLE_SECONDS = 0.25
 
 IMU_ALIGNMENT_TIMEOUT_SECONDS = 60.0
 IMU_MAX_ALIGNMENT_ITERATIONS = 80
-IMU_MAX_RELATIVE_TRAVEL_DEG = 30.0 
+IMU_MAX_RELATIVE_TRAVEL_DEG = 30.0
 IMU_MAX_WORSENING_COUNT = 3
 IMU_WORSENING_MARGIN_DEG = 0.1
 
@@ -295,10 +300,10 @@ FINAL_FRAME_COUNT = 18
 
 # Start long exposures immediately after the initial target solve.
 PIPELINED_CAPTURE_ENABLED = True
-PIPELINED_EXPOSURE_SECONDS = 110.0
-PIPELINED_FRAME_COUNT = 17
+PIPELINED_EXPOSURE_SECONDS = 10.0
+PIPELINED_FRAME_COUNT = 3
 # True: the last exposure has no solve/correction running alongside it.
-PIPELINED_SKIP_FINAL_CORRECTION = True
+PIPELINED_SKIP_FINAL_CORRECTION = False
 EXIT_AFTER_CAPTURE = True
 
 # 각 장노출 프레임이 저장된 뒤 다음 프레임을 시작하기 전 대기시간.

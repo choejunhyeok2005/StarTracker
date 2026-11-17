@@ -11,8 +11,8 @@ AZ는 기존 스텝 추정과 Plate Solving 보정을 유지합니다.
 엔코더 모델이 미정이므로 `ENCODER_ENABLED=False`가 기본값입니다.
 
 현재 기본 촬영 흐름은 [PIPELINED_CAPTURE.md](PIPELINED_CAPTURE.md)를 참고하세요.
-최초 목표 plate solving 후 즉시 연속 장노출을 시작하고, 이전 완료 사진으로
-다음 촬영 중 병렬 보정합니다. 보정 15회 후 18장 촬영 흐름은
+최초 목표 plate solving 후 즉시 10초씩 3장을 촬영하며, 이전 사진의 풀이를 후속 노출과 함께 진행합니다.
+보정 15회 후 18장 촬영 흐름은
 `PIPELINED_CAPTURE_ENABLED=False`인 기존 모드 설명입니다.
 
 Raspberry Pi 5, HQ Camera, GNSS, BLE 조이스틱, ALT/AZ 스테퍼 모터와 두 개의
@@ -105,11 +105,8 @@ python -m unittest discover -s tests -v
     저장합니다.
 13. 20 Hz를 목표로 하는 tracking loop에서 현재 UTC의 목표 Alt/Az를 계산하고 두 모터를
     구동합니다.
-14. 기본 모드에서는 즉시 110초 노출 17장 촬영을 시작합니다. 두 번째 촬영부터
-    이전 완료 사진을 별도 스레드에서 plate solving하여 현재 모터 위치를 보정합니다.
-    목표 RA/Dec는 유지하며 추적 루프가 보정 이동을 수행합니다.
-15. 마지막 촬영 직전에는 진행 중인 분석을 기다립니다. 마지막 노출 중에는 추가 분석을
-    하지 않지만 목표를 따라가는 모터 추적은 계속합니다.
+14. 기본 모드에서는 즉시 10초 노출 3장을 순서대로 촬영합니다.
+15. 노출 중에도 모터 추적을 유지하고, 두 번째와 세 번째 노출에서는 분석 스레드가 비어 있으면 직전 사진을 풀어 보정합니다.
 16. 사진과 로그를 저장하고 모터를 정지합니다. 정상 촬영 완료 후 기본 설정
     `EXIT_AFTER_CAPTURE=True`에 따라 프로그램을 종료합니다.
 
@@ -185,24 +182,22 @@ MANUAL_MAX_ALTITUDE = 90.0
 
 ## 촬영 모드와 저장 파일
 
-### 기본: 촬영과 보정을 병렬 실행
+### 기본: 10초씩 3장, 촬영 중 병렬 보정
 
 ```python
 PIPELINED_CAPTURE_ENABLED = True
-PIPELINED_EXPOSURE_SECONDS = 110.0
-PIPELINED_FRAME_COUNT = 17
-PIPELINED_SKIP_FINAL_CORRECTION = True
+PIPELINED_EXPOSURE_SECONDS = 10.0
+PIPELINED_FRAME_COUNT = 3
+PIPELINED_SKIP_FINAL_CORRECTION = False
 EXIT_AFTER_CAPTURE = True
 ```
 
-설정상 총 노출 시간은 1,870초(31분 10초)이며 초기 목표 촬영·분석, 파일 저장,
-분석 대기 시간은 별도입니다. 실제 노출 시간은 카메라 메타데이터로 확인해야 합니다.
+설정상 총 노출 시간은 30초입니다. 초기 목표 촬영·분석과 파일 저장 시간은
+별도입니다. 후속 풀이가 진행 중이면 다음 풀이를 건너뛰며, 촬영이 끝난 뒤에는 진행 중인 풀이의 종료를 기다릴 수 있습니다.
+실제 노출 시간은 카메라 메타데이터에서 확인할 수 있습니다.
 사진은 `data/images/final_sequence/final_<시각>_<번호>.jpg`에 개별 저장되며
 자동 합성하지 않습니다. 최초 목표 사진도 `data/images/plate_<시각>.jpg`로 보존합니다.
 
-기본 설정에서는 최대 15번의 병렬 분석 기회가 있습니다. 분석이 노출보다 오래 걸리면
-오래된 프레임을 대기열에 쌓지 않고 다음 기회에 최신 완료 사진을 분석합니다.
-완료 조건은 성공 보정 횟수가 아닌 저장 장수이며, 연속 보정 실패 3회면 중단합니다.
 `CORRECTION_INTERVAL`과 `MAX_CORRECTION_COUNT`는 기본 모드의 촬영 시작 조건이 아닙니다.
 
 ### 기존: 주기 보정 후 촬영
@@ -225,7 +220,7 @@ FINAL_DRIFT_CORRECTION_EVERY_FRAMES = 3
 ### 시야 회전과 현장 확인
 
 ALT/AZ 2축 구조는 목표 중심을 따라가도 시야 회전을 제거하지 못합니다.
-노출 중 모터 보정도 별 흔들림을 만들 수 있으므로 110초 노출의 별 모양과
+노출 중 모터 추적도 별 흔들림을 만들 수 있으므로 10초 노출의 별 모양과
 plate solving 성공률은 현장에서 확인해야 합니다. 별 정렬·시야 회전 보정·스태킹은
 후처리 프로그램에서 수행합니다.
 
