@@ -1,4 +1,6 @@
 import unittest
+from unittest.mock import patch
+import config
 
 from controllers.imu_leveling_controller import AlignmentResult
 from managers.state_manager import SystemState
@@ -79,6 +81,12 @@ def fake_leveler_factory(events):
 
 class TrackingStartupTests(unittest.TestCase):
     """Catch camera/manual startup before a required alignment succeeds."""
+
+    def setUp(self):
+        # Retain explicit coverage of the original alignment-only mode.
+        setting = patch.object(config, "IMU_TRACKING_ENABLED", False)
+        setting.start()
+        self.addCleanup(setting.stop)
 
     def make_manager(self, events, *, imu_failure=None):
         return TrackingManager(

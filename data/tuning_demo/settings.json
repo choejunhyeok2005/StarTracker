@@ -1,0 +1,22 @@
+{
+  "hardware": false,
+  "start_alt": 40.0,
+  "step": 1.0,
+  "hold": 30.0,
+  "baseline": 5.0,
+  "cycles": 3,
+  "kp": 0.8,
+  "ki": 0.0,
+  "kd": 0.0,
+  "tolerance": 0.15,
+  "output": "data/tuning_demo",
+  "simulation_only": true,
+  "filter_mode": "kalman",
+  "interval_s": 0.05,
+  "max_speed": 0.1,
+  "max_acceleration": 0.2,
+  "max_steps_per_update": 5,
+  "kalman_q_angle": 0.01,
+  "kalman_q_bias": 0.0001,
+  "kalman_r_angle": 0.09
+}

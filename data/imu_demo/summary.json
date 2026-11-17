@@ -1,0 +1,9 @@
+{
+  "simulation_only": true,
+  "duration_s": 80,
+  "disturbance_s": 30,
+  "disturbance_alt_deg": -0.7,
+  "final_measured_alt_error_deg": 0.11934634236483532,
+  "final_physical_alt_error_deg": 0.11510416666703804,
+  "az_source": "step_estimate_not_IMU"
+}

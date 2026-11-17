@@ -37,5 +37,10 @@ def create_streaming_app(camera_manager):
             camera_manager.generate_frames(),
             mimetype="multipart/x-mixed-replace; boundary=frame",
         )
+    
+    @app.route("/health")
+    def health():
+        """헬스 체크 엔드포인트."""
+        return {"status": "running", "streaming": camera_manager.is_enabled()}
 
     return app

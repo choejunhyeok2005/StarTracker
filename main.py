@@ -9,13 +9,51 @@ import threading
 import time
 
 import config
+from services.console_logger import start_console_file_logging
+
+
+# When this file is launched directly, start the tee before importing the
+# hardware/application modules so their import-time warnings are saved too.
+_early_console_log_session = None
+if __name__ == "__main__" and config.CONSOLE_LOG_ENABLED:
+    try:
+        _early_console_log_session = start_console_file_logging(
+            config.CONSOLE_LOG_DIRECTORY
+        )
+        print(
+            "[Main] Console log file: "
+            f"{_early_console_log_session.path}"
+        )
+    except Exception as error:
+        print(f"[Main] Console file logging unavailable: {error}")
 
 from communication.ble_manager import BLEManager
+from controllers.session_controller import SessionController
 from managers.compass_manager import CompassManager
 from managers.lcd_manager import install_print_hook, lcd_manager, restore_print_hook
 from managers.sensor_manager import SensorManager
 from managers.tracking_manager import TrackingManager
 from services.web_server import create_streaming_app
+
+
+def _resolve_gnss_startup(sensor, sensor_initialized):
+    if sensor_initialized:
+        sensor.wait_for_position(timeout=config.GNSS_FIX_TIMEOUT)
+
+    location = sensor.get_location() if sensor.has_fix() else None
+    if location is not None:
+        sensor.wait_for_utc(timeout=config.GNSS_UTC_TIMEOUT)
+
+    if location is None:
+        return (
+            (config.GNSS_FALLBACK_LATITUDE, config.GNSS_FALLBACK_LONGITUDE,
+             config.GNSS_FALLBACK_ALTITUDE),
+            None,
+            "[GNSS] No position fix: fallback location + system UTC",
+        )
+    if sensor.get_utc() is None:
+        return location, None, "[GNSS] Position fix available; using system UTC"
+    return location, sensor.get_utc, "[GNSS] Position and UTC available from GNSS"
 
 
 async def run_star_tracker() -> None:
@@ -24,6 +62,8 @@ async def run_star_tracker() -> None:
     tracking = TrackingManager()
     ble = BLEManager(tracking)
     compass = CompassManager()
+    camera = tracking.camera
+    session = SessionController(tracking, ble)
 
     install_print_hook()
 
@@ -44,8 +84,7 @@ async def run_star_tracker() -> None:
         sensor_initialized = sensor.initialize()
 
         if not sensor_initialized:
-            print("[Main] GNSS initialization failed.")
-            return
+            print("[Main] GNSS initialization failed; applying fallback policy.")
 
         # ==================================================
         # 2. Hardware + Compass Calibration + IMU Alignment
@@ -53,12 +92,25 @@ async def run_star_tracker() -> None:
 
         print("[Main] Hardware initialization & Compass calibration...")
 
-        if compass.initialize():
-            cal_success = await compass.calibrate_async(sample_divisions=25)
-            if not cal_success:
-                print(
-                    "[Main] Compass calibration failed. Proceeding with caution."
-                )
+        compass_initialized = compass.initialize()
+
+        if compass_initialized:
+            if config.COMPASS_CALIBRATION_ENABLED:
+                try:
+                    cal_success = await compass.calibrate_async(sample_divisions=25)
+                except Exception as error:
+                    print(f"[Main] Compass calibration error: {error}")
+                    cal_success = False
+
+                if not cal_success:
+                    print("Compass cal failed")
+                    print("Continuing without cal")
+            else:
+                compass.disable_motor()
+                print("[Main] Compass calibration skipped by configuration")
+        else:
+            print("Compass init failed")
+            print("Continuing without compass")
 
         alignment_result = tracking.initialize_hardware()
 
@@ -72,20 +124,11 @@ async def run_star_tracker() -> None:
         # 3. Wait For GNSS Fix
         # ==================================================
 
-        fix_success = sensor.wait_for_fix(timeout=config.GNSS_FIX_TIMEOUT)
-
-        if not fix_success:
-            print("[Main] GNSS Fix acquisition failed.")
-            print("[Main] Move the system outdoors and restart.")
-            return
-
-        location = sensor.get_location()
-
-        if location is None:
-            print("[Main] GNSS location data is unavailable.")
-            return
-
+        location, time_provider, gnss_status = _resolve_gnss_startup(
+            sensor, sensor_initialized,
+        )
         latitude, longitude, altitude = location
+        print(gnss_status)
 
         print()
         print("[Main] GNSS Location")
@@ -102,7 +145,7 @@ async def run_star_tracker() -> None:
         # 4. GNSS UTC Provider + Observer
         # ==================================================
 
-        tracking.set_time_provider(sensor.get_utc)
+        tracking.set_time_provider(time_provider)
 
         tracking.configure_observer(
             latitude=latitude,
@@ -141,8 +184,9 @@ async def run_star_tracker() -> None:
         flask_app = create_streaming_app(camera)
 
         def run_flask():
+            # 0.0.0.0에 바인드 (모든 인터페이스)하되, 출력 메시지에서는 사용자 설정 IP 사용
             flask_app.run(
-                host=config.STREAMING_SERVER_HOST,
+                host="0.0.0.0",
                 port=config.STREAMING_SERVER_PORT,
                 debug=False,
                 use_reloader=False,
@@ -170,9 +214,11 @@ async def run_star_tracker() -> None:
         print("[Control]")
         print("Joystick X : AZ movement")
         print("Joystick Y : ALT movement")
-        print("Joystick Click : Manual Control Finished → Long Exposure Start")
+        print("Joystick Click : Start tracking / Stop current session")
         print("Ctrl+C : Program Exit")
         print()
+
+        lcd_manager.write_text(gnss_status + "\n")
 
         # ==================================================
         # 8. Main Loop
@@ -180,9 +226,10 @@ async def run_star_tracker() -> None:
 
         while True:
 
-            # 사용자가 조이스틱을 클릭하면 ble._stop_event가 설정된다
-            if ble._stop_event.is_set():
-                print("[Main] Joystick click detected → Manual control finished")
+            await session.run_pending()
+
+            if tracking.capture_completed and config.EXIT_AFTER_CAPTURE:
+                print("[Main] Exposure sequence completed; exiting.")
                 break
 
             if not ble.running:
@@ -202,16 +249,8 @@ async def run_star_tracker() -> None:
         # 9. Stop Streaming + Long Exposure
         # ==================================================
 
-        print("[Main] Stopping streaming...")
-        camera.stop_streaming()
-
-        print("[Main] Waiting for camera stabilization...")
-        time.sleep(0.5)
-
-        print("[Main] Starting long exposure capture...")
-        camera.capture_long_exposure()
-
-        print("[Main] Long exposure complete")
+        if not tracking.capture_completed:
+            tracking.stop_tracking(reason="ble_disconnected")
 
     except asyncio.CancelledError:
         print("[Main] Program cancellation requested.")
@@ -225,10 +264,11 @@ async def run_star_tracker() -> None:
         print()
         print("[Main] System shutdown started...")
 
+        # Stop motor output before shutting down the input and worker threads.
         try:
-            camera.stop_streaming()
+            tracking.motor.stop()
         except Exception as error:
-            print(f"[Main] Camera Streaming Shutdown Warning: {error}")
+            print(f"[Main] Motor Stop Warning: {error}")
 
         try:
             await ble.disconnect()
@@ -239,6 +279,11 @@ async def run_star_tracker() -> None:
             tracking.shutdown()
         except Exception as error:
             print(f"[Main] Tracking Shutdown Warning: {error}")
+
+        try:
+            camera.stop_streaming()
+        except Exception as error:
+            print(f"[Main] Camera Streaming Shutdown Warning: {error}")
 
         try:
             compass.shutdown()
@@ -269,6 +314,20 @@ async def run_star_tracker() -> None:
 
 def main() -> None:
 
+    console_log_session = _early_console_log_session
+
+    if config.CONSOLE_LOG_ENABLED:
+        try:
+            console_log_session = start_console_file_logging(
+                config.CONSOLE_LOG_DIRECTORY
+            )
+            print(
+                "[Main] Console log file: "
+                f"{console_log_session.path}"
+            )
+        except Exception as error:
+            print(f"[Main] Console file logging unavailable: {error}")
+
     try:
         asyncio.run(run_star_tracker())
     except KeyboardInterrupt:
@@ -287,6 +346,10 @@ def main() -> None:
         lcd_manager.clear()
         lcd_manager.set_backlight(False)
         lcd_manager.close()
+
+    finally:
+        if console_log_session is not None:
+            console_log_session.close()
 
 
 if __name__ == "__main__":
