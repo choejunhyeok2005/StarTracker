@@ -71,6 +71,13 @@ class MotorController:
         self.step_angle = config.STEP_ANGLE
         self.steps_per_degree = config.STEPS_PER_DEGREE
 
+        # Sidereal feedforward: fractional steps owed from target motion.
+        self._ff_alt = 0.0
+        self._ff_az = 0.0
+        self._ff_previous_target = None
+        # True while a long exposure is open: feedforward only.
+        self.exposure_hold = False
+
         # Tracking Thread와 Correction Thread의 동시 접근 방지
         self._motor_lock = threading.Lock()
         # 수동 조작 시 두 축을 독립적으로 움직이기 위한 Lock
@@ -392,6 +399,8 @@ class MotorController:
         if not all(math.isfinite(v) for v in (alt, az)):
             raise ValueError("Target angles must be finite")
         with self._motor_lock:
+            previous = (self._ff_previous_target
+                        if self.mode == MotorMode.TRACKING else None)
             if self.feedback and self.mode != MotorMode.TRACKING:
                 self.feedback.reset()
             if self.imu_feedback and self.mode != MotorMode.TRACKING:
@@ -399,6 +408,42 @@ class MotorController:
             self.mode = MotorMode.TRACKING
             self.target_alt = self._clamp_altitude(alt)
             self.target_az = self._normalize_azimuth(az)
+            self._accumulate_feedforward(previous)
+            self._ff_previous_target = (self.target_alt, self.target_az)
+
+    def set_exposure_hold(self, enabled: bool) -> None:
+        """Freeze feedback (not feedforward) while a long exposure is open."""
+        with self._motor_lock:
+            self.exposure_hold = bool(enabled)
+
+    def _accumulate_feedforward(self, previous) -> None:
+        if previous is None or not getattr(config, "TRACKING_FEEDFORWARD_ENABLED", False):
+            self._ff_alt = self._ff_az = 0.0
+            return
+        delta_alt = self.target_alt - previous[0]
+        delta_az = self._shortest_azimuth_error(
+            target_az=self.target_az, current_az=previous[1])
+        limit = config.TRACKING_FEEDFORWARD_MAX_STEP_DEG
+        if abs(delta_alt) > limit or abs(delta_az) > limit:
+            # New target or slew: feedback handles it, nothing is owed.
+            self._ff_alt = self._ff_az = 0.0
+            return
+        self._ff_alt += delta_alt * self.steps_per_degree
+        self._ff_az += delta_az * self.steps_per_degree
+
+    def _combine_steps(self, feedback_steps: int, axis: str) -> int:
+        """Add owed feedforward steps; anything over the cap stays owed."""
+        owed = self._ff_alt if axis == "ALT" else self._ff_az
+        ff = math.trunc(owed)
+        total = feedback_steps + ff
+        cap = config.MAX_STEP_PER_UPDATE
+        clipped = max(-cap, min(cap, total))
+        owed -= ff - (total - clipped)
+        if axis == "ALT":
+            self._ff_alt = owed
+        else:
+            self._ff_az = owed
+        return clipped
 
     # 이전 코드와의 호환용
     def goto(
@@ -487,41 +532,37 @@ class MotorController:
                 current_az=self.current_az,
             )
 
-            alt_steps = 0
-            az_steps = 0
+            signed_alt = 0
+            signed_az = 0
             imu_speed = 0.0
-
-            alt_direction = alt_error >= 0
-            az_direction = az_error >= 0
+            # During an exposure only feedforward moves the axes.
+            hold = (self.exposure_hold and
+                    getattr(config, "TRACKING_HOLD_FEEDBACK_DURING_EXPOSURE", False))
 
             if self.imu_feedback:
-                signed_steps, imu_speed = self.imu_feedback.steps(self)
+                signed_steps, imu_speed = self.imu_feedback.steps(self, hold=hold)
                 if signed_steps is None:
                     # Driver pulses are synchronous; withholding this call pauses
                     # BOTH axes without disabling holding torque or resuming a fault.
+                    # Feedforward stays owed and is delivered after recovery.
                     return
-                alt_steps, alt_direction = abs(signed_steps), signed_steps >= 0
-            elif abs(alt_error) >= config.ANGLE_TOLERANCE:
-
-                requested_alt_steps = self.angle_to_steps(
-                    abs(alt_error)
-                )
-
-                alt_steps = min(
-                    requested_alt_steps,
+                signed_alt = signed_steps
+            elif not hold and abs(alt_error) >= config.ANGLE_TOLERANCE:
+                signed_alt = int(math.copysign(min(
+                    self.angle_to_steps(abs(alt_error)),
                     config.MAX_STEP_PER_UPDATE,
-                )
+                ), alt_error))
 
-            if abs(az_error) >= config.ANGLE_TOLERANCE:
-
-                requested_az_steps = self.angle_to_steps(
-                    abs(az_error)
-                )
-
-                az_steps = min(
-                    requested_az_steps,
+            if not hold and abs(az_error) >= config.ANGLE_TOLERANCE:
+                signed_az = int(math.copysign(min(
+                    self.angle_to_steps(abs(az_error)),
                     config.MAX_STEP_PER_UPDATE,
-                )
+                ), az_error))
+
+            signed_alt = self._combine_steps(signed_alt, "ALT")
+            signed_az = self._combine_steps(signed_az, "AZ")
+            alt_steps, alt_direction = abs(signed_alt), signed_alt >= 0
+            az_steps, az_direction = abs(signed_az), signed_az >= 0
 
             if self.imu_feedback:
                 self.imu_feedback.record(self, alt_steps if alt_direction else -alt_steps,

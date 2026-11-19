@@ -515,6 +515,14 @@ class TrackingManager:
         self._safe_log(self.logger.record_event, name="imu_deadline_recovery",
                        timestamp_utc=self._current_time_iso(), details=details)
 
+    def _set_exposure_hold(self, enabled):
+        """Feedforward-only tracking while the shutter is open."""
+        if not getattr(config, "TRACKING_HOLD_FEEDBACK_DURING_EXPOSURE", False):
+            return
+        setter = getattr(self.motor, "set_exposure_hold", None)
+        if setter is not None:
+            setter(enabled)
+
     def _record_capture_settle_sample(self, target_alt, target_az, *, fresh=True):
         """Count only fresh tracking updates after a correction."""
         alt_tolerance = (config.IMU_TRACKING_PID["tolerance"]
@@ -655,10 +663,14 @@ class TrackingManager:
                         future.result()
                     future = worker.submit(self._solve_exposure, previous_frame)
                 started = self._get_observation_time()
-                path = self.camera.capture_long_exposure(
-                    filename=str(directory / f"final_{sequence_id}_{number:03d}.jpg"),
-                    exposure_time=exposure,
-                )
+                self._set_exposure_hold(True)
+                try:
+                    path = self.camera.capture_long_exposure(
+                        filename=str(directory / f"final_{sequence_id}_{number:03d}.jpg"),
+                        exposure_time=exposure,
+                    )
+                finally:
+                    self._set_exposure_hold(False)
                 paths.append(path)
                 ended = self._get_observation_time()
                 metadata = getattr(self.camera, "last_exposure_metadata", None) or {}

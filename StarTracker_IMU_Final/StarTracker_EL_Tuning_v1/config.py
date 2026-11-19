@@ -170,6 +170,16 @@ IMU_GYRO_CALIBRATION_MAX_BIAS_DPS = 5.0
 IMU_TRACKING_PID = dict(kp=0.315, ki=0.005, kd=0.125, max_speed=0.05,
                         max_acceleration=0.20, tolerance=0.150,
                         stop_tolerance=0.135)
+# Sidereal feedforward: step both axes by the target's own Alt/Az change each
+# update, so feedback only trims residual error (matlab/compare_tracking_strategies.m).
+TRACKING_FEEDFORWARD_ENABLED = True
+# A larger target change between two updates is a new target or slew, not
+# sidereal motion; it is left to feedback instead of being fed forward.
+TRACKING_FEEDFORWARD_MAX_STEP_DEG = 0.05
+# During each long exposure drive feedforward only: no IMU EL PID and no AZ
+# tolerance correction, so IMU noise cannot move the image. Safety reads,
+# limits, stall and deadline handling still run.
+TRACKING_HOLD_FEEDBACK_DURING_EXPOSURE = True
 IMU_TRACKING_FILTER_TAU = 0.25  # seconds; first-order low-pass on gravity tilt
 IMU_TRACKING_MAX_READ_SECONDS = 0.15
 # Tracking-only recovery: withhold both axes until fresh readings agree.

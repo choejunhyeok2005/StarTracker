@@ -114,7 +114,12 @@ class IMUTrackingController:
         self.offset += delta
         self.reset()
 
-    def steps(self, motor):
+    def steps(self, motor, hold=False):
+        """Return (signed EL steps, PID speed) or (None, 0.0) while recovering.
+
+        hold=True (exposure open): the IMU is still read and every safety
+        check still runs, but the PID commands nothing and restarts afterwards.
+        """
         now = self.clock()
         dt = config.TRACKING_INTERVAL if self.last_control_time is None else now - self.last_control_time
         recovering = self.recovery_started is not None
@@ -177,6 +182,11 @@ class IMUTrackingController:
                     raise
             # Never send pulses on a recovery sample, including the final one.
             return None, 0.0
+        if hold:
+            self.pid.reset()
+            self.remainder = 0.0
+            self._check_stall(now, alt)
+            return 0, 0.0
         error = motor.target_alt - alt
         self.pid.max_speed = min(config.IMU_TRACKING_PID["max_speed"],
                                  config.MAX_STEP_PER_UPDATE * motor.step_angle / dt,
@@ -189,6 +199,13 @@ class IMUTrackingController:
         self.remainder = demand - steps
         bound = config.MAX_ALTITUDE - alt if steps > 0 else alt - config.MIN_ALTITUDE
         steps = (1 if steps >= 0 else -1) * min(abs(steps), int(max(0, bound) / motor.step_angle))
+        self._check_stall(now, alt)
+        if steps:
+            since, initial, commanded = self.watch or (now, alt, 0.0)
+            self.watch = (since, initial, commanded + abs(steps) * motor.step_angle)
+        return steps, speed
+
+    def _check_stall(self, now, alt):
         if self.watch:
             since, initial, commanded = self.watch
             if abs(alt - initial) >= config.IMU_TRACKING_STALL_MOVEMENT_DEG:
@@ -197,10 +214,6 @@ class IMUTrackingController:
                 if commanded >= config.IMU_TRACKING_STALL_COMMAND_DEG:
                     raise RuntimeError("IMU EL did not respond to motor commands")
                 self.watch = None
-        if steps:
-            since, initial, commanded = self.watch or (now, alt, 0.0)
-            self.watch = (since, initial, commanded + abs(steps) * motor.step_angle)
-        return steps, speed
 
     def _emit_recovery(self, outcome, **details):
         if self.recovery_callback:
