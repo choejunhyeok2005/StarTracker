@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from collections.abc import Callable
 
 
+def _alt_steps_per_degree() -> float:
+    import config
+    return config.STEPS_PER_DEGREE / getattr(config, "ALT_STEP_RATIO", 1.0)
+
+
 class IMUAlignmentError(RuntimeError):
     """Raised when startup alignment cannot be completed safely."""
 
@@ -79,13 +84,13 @@ class AlignmentSettings:
             max_iterations=config.IMU_MAX_ALIGNMENT_ITERATIONS,
             max_relative_travel_steps=round(
                 config.IMU_MAX_RELATIVE_TRAVEL_DEG
-                * config.STEPS_PER_DEGREE
+                * _alt_steps_per_degree()
             ),
             max_worsening_count=config.IMU_MAX_WORSENING_COUNT,
             worsening_margin_deg=(
                 config.IMU_WORSENING_MARGIN_DEG
             ),
-            steps_per_degree=config.STEPS_PER_DEGREE,
+            steps_per_degree=_alt_steps_per_degree(),
         )
 
 

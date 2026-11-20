@@ -255,7 +255,7 @@ class IMUTrackingController:
                                   error_alt=motor.target_alt - motor.current_alt,
                                   target_az=motor.target_az, actual_az=motor.current_az,
                                   error_az=angular_error(motor.target_az, motor.current_az),
-                                  speed_alt=alt_speed, speed_az=az_steps * motor.step_angle / self.control_dt,
+                                  speed_alt=alt_speed, speed_az=az_steps * getattr(motor, "az_step_angle", motor.step_angle) / self.control_dt,
                                   steps_alt=alt_steps, steps_az=az_steps, **diagnostics)
 
     def close(self):

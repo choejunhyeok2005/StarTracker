@@ -137,7 +137,7 @@ def diagnose(s):
         else:
             if spread <= 0.05:
                 notes.append(f"배율 {ratio:.3f}로 일정: 기어비/마이크로스텝 값 확인, "
-                             f"안 되면 피드포워드 배율 {1 / ratio:.3f}로 보정 가능")
+                             f"안 되면 config의 축별 STEP_RATIO로 보정 가능")
     fwd, back = s["ratio_forward"], s["ratio_backward"]
     if fwd and back and abs(fwd - back) / max(abs(fwd), abs(back)) > 0.05:
         notes.append(f"정방향 {fwd:.3f} / 역방향 {back:.3f} 차이: 축 균형(무게중심) 또는 부하 방향 영향")
@@ -289,6 +289,9 @@ def main(argv=None):
         for axis in axes:
             rows = procedure.run_axis(axis)
             summary[axis] = summarize_axis(rows, args.steps)
+            # Ratio is relative to the uncorrected config.STEP_ANGLE, so it
+            # goes into config.py as-is regardless of the current setting.
+            summary[axis]["config_line"] = f"{axis}_STEP_RATIO = {summary[axis]['ratio']:.4f}"
     except KeyboardInterrupt:
         status = "cancelled"
     except Exception as error:
@@ -304,6 +307,8 @@ def main(argv=None):
               f"backlash {s['backlash_deg'] if s['backlash_deg'] is None else round(s['backlash_deg'], 4)} deg")
         for note in s["diagnosis"]:
             print(f"   - {note}")
+        if "config_line" in s:
+            print(f"   - 소프트웨어 보정 시 config.py: {s['config_line']}")
     return 0 if status == "completed" else 1
 
 

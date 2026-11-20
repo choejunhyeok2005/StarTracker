@@ -46,6 +46,12 @@ STEP_ANGLE = (
 # 약 960 steps/degree
 STEPS_PER_DEGREE = 1.0 / STEP_ANGLE
 
+# 축별 실측 배율: 1펄스에 실제 출력축이 움직이는 각도 / STEP_ANGLE.
+# calibrate_steps.py가 출력하는 ratio 값을 그대로 넣는다. 1.0 = 계산값 그대로.
+# 예: AZ가 계산보다 2배 움직이면 AZ_STEP_RATIO = 2.0
+ALT_STEP_RATIO = 1.0
+AZ_STEP_RATIO = 1.0
+
 
 # =========================================================
 # Motor GPIO

@@ -68,8 +68,15 @@ class MotorController:
         self.alignment_relative_steps = 0
         self._alignment_max_relative_steps = 0
 
-        self.step_angle = config.STEP_ANGLE
-        self.steps_per_degree = config.STEPS_PER_DEGREE
+        # Output-axis degrees per pulse, corrected by the measured per-axis
+        # ratio. step_angle/steps_per_degree keep their old meaning (ALT).
+        alt_ratio = getattr(config, "ALT_STEP_RATIO", 1.0)
+        az_ratio = getattr(config, "AZ_STEP_RATIO", 1.0)
+        if not all(math.isfinite(r) and r > 0 for r in (alt_ratio, az_ratio)):
+            raise ValueError("ALT_STEP_RATIO and AZ_STEP_RATIO must be positive")
+        self.step_angle = config.STEP_ANGLE * alt_ratio
+        self.az_step_angle = config.STEP_ANGLE * az_ratio
+        self.steps_per_degree = 1.0 / self.step_angle
 
         # Sidereal feedforward: fractional steps owed from target motion.
         self._ff_alt = 0.0
@@ -261,7 +268,7 @@ class MotorController:
             )
 
             moved_angle = self.steps_to_angle(
-                steps
+                steps, axis
             )
 
             if axis == "ALT":
@@ -428,8 +435,8 @@ class MotorController:
             # New target or slew: feedback handles it, nothing is owed.
             self._ff_alt = self._ff_az = 0.0
             return
-        self._ff_alt += delta_alt * self.steps_per_degree
-        self._ff_az += delta_az * self.steps_per_degree
+        self._ff_alt += delta_alt / self.step_angle
+        self._ff_az += delta_az / self.az_step_angle
 
     def _combine_steps(self, feedback_steps: int, axis: str) -> int:
         """Add owed feedforward steps; anything over the cap stays owed."""
@@ -555,7 +562,7 @@ class MotorController:
 
             if not hold and abs(az_error) >= config.ANGLE_TOLERANCE:
                 signed_az = int(math.copysign(min(
-                    self.angle_to_steps(abs(az_error)),
+                    self.angle_to_steps(abs(az_error), "AZ"),
                     config.MAX_STEP_PER_UPDATE,
                 ), az_error))
 
@@ -619,7 +626,7 @@ class MotorController:
 
         if az_steps > 0:
 
-            moved_az = self.steps_to_angle(az_steps)
+            moved_az = self.steps_to_angle(az_steps, "AZ")
 
             if az_direction:
                 self.current_az += moved_az
@@ -695,24 +702,29 @@ class MotorController:
     # Angle / Step Conversion
     # =====================================================
 
+    def axis_step_angle(self, axis: str = "ALT") -> float:
+        return self.az_step_angle if axis.upper() == "AZ" else self.step_angle
+
     def angle_to_steps(
         self,
         angle: float,
+        axis: str = "ALT",
     ) -> int:
 
         if angle <= 0:
             return 0
 
         return round(
-            angle * self.steps_per_degree
+            angle / self.axis_step_angle(axis)
         )
 
     def steps_to_angle(
         self,
         steps: int,
+        axis: str = "ALT",
     ) -> float:
 
-        return steps * self.step_angle
+        return steps * self.axis_step_angle(axis)
 
     # =====================================================
     # Angle Utilities
@@ -803,7 +815,7 @@ class MotorController:
             self.stop()
             raise
         if axis == "AZ":
-            self.current_az = (self.current_az + self.steps_to_angle(steps) * (1 if direction else -1)) % 360
+            self.current_az = (self.current_az + self.steps_to_angle(steps, "AZ") * (1 if direction else -1)) % 360
 
     def _move_manual_feedback(self, axis, direction, steps, pulse_delay):
         """Bound manual bursts using fresh encoder readings; no PID target hold."""

@@ -79,22 +79,24 @@ class EncoderFeedback:
         positions = {"ALT": alt, "AZ": az}
         speeds, steps = {}, {}
         # Do not accumulate integration against a lower-level step-rate limit.
-        speed_cap = min(config.MAX_STEP_PER_UPDATE * motor.step_angle / dt,
-                        motor.step_angle / (2 * config.MOTOR_PULSE_DELAY))
         for axis in ("ALT", "AZ"):
+            step_angle = (motor.axis_step_angle(axis) if hasattr(motor, "axis_step_angle")
+                          else motor.step_angle)
+            speed_cap = min(config.MAX_STEP_PER_UPDATE * step_angle / dt,
+                            step_angle / (2 * config.MOTOR_PULSE_DELAY))
             pid = self.pid[axis]
             pid.max_speed = min(config.POSITION_PID[axis]["max_speed"], speed_cap)
             speed = pid.update(errors[axis], positions[axis], dt, circular=axis == "AZ")
             if abs(errors[axis]) <= pid.tolerance:
                 self.remainder[axis] = 0.0
-            demand = speed * dt / motor.step_angle + self.remainder[axis]
+            demand = speed * dt / step_angle + self.remainder[axis]
             count = math.trunc(demand)
             count = max(-config.MAX_STEP_PER_UPDATE, min(config.MAX_STEP_PER_UPDATE, count))
             self.remainder[axis] = demand - count
             # Keep pulse rounding and integral braking inside ALT limits.
             if axis == "ALT":
                 bound = config.MAX_ALTITUDE - alt if count > 0 else alt - config.MIN_ALTITUDE
-                count = (1 if count >= 0 else -1) * min(abs(count), int(max(0, bound) / motor.step_angle))
+                count = (1 if count >= 0 else -1) * min(abs(count), int(max(0, bound) / step_angle))
             speeds[axis], steps[axis] = speed, count
             watch = self.watch[axis]
             if watch is not None:
@@ -109,7 +111,7 @@ class EncoderFeedback:
                     watch = None
             if count:
                 since, initial, commanded = watch or (now, positions[axis], 0.0)
-                watch = (since, initial, commanded + abs(count) * motor.step_angle)
+                watch = (since, initial, commanded + abs(count) * step_angle)
             self.watch[axis] = watch
         if motor.mode.name != "TRACKING":
             return

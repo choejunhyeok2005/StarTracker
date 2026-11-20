@@ -154,3 +154,59 @@ class ExposureHoldSequenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PerAxisStepRatioTests(unittest.TestCase):
+    """AZ_STEP_RATIO / ALT_STEP_RATIO from calibrate_steps.py."""
+
+    def make(self, alt_ratio=1.0, az_ratio=1.0):
+        patcher = patch.multiple(config, ALT_STEP_RATIO=alt_ratio, AZ_STEP_RATIO=az_ratio,
+                                 CONTROL_TELEMETRY_ENABLED=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        plant = SimulatedMount()
+        plant.efficiency = 1.0
+        motor = MotorController(driver=plant, clock=lambda: plant.time)
+        return plant, motor
+
+    def test_default_ratio_keeps_old_step_angle(self):
+        _, motor = self.make()
+        self.assertEqual(motor.step_angle, config.STEP_ANGLE)
+        self.assertEqual(motor.az_step_angle, config.STEP_ANGLE)
+        self.assertEqual(motor.angle_to_steps(1.0, "AZ"), motor.angle_to_steps(1.0))
+
+    def test_az_ratio_two_halves_az_steps_only(self):
+        _, motor = self.make(az_ratio=2.0)
+        self.assertEqual(motor.angle_to_steps(1.0, "AZ") * 2, motor.angle_to_steps(1.0, "ALT"))
+        self.assertAlmostEqual(motor.steps_to_angle(10, "AZ"), 20 * config.STEP_ANGLE)
+        self.assertEqual(motor.step_angle, config.STEP_ANGLE)
+
+    def test_az_feedforward_matches_real_axis_with_ratio(self):
+        plant, motor = self.make(az_ratio=2.0)
+        plant.efficiency = 1.0
+        az_gain = 2.0  # the real AZ axis moves twice the nominal step
+
+        def drive(alt_steps, alt_direction, az_steps, az_direction):
+            plant.az += az_steps * config.STEP_ANGLE * az_gain * (1 if az_direction else -1)
+
+        plant.drive_dual = drive
+        motor.current_alt, motor.current_az = 40.0, 10.0
+        plant.az = 10.0
+        for tick in range(200):
+            plant.time = tick * config.TRACKING_INTERVAL
+            motor.set_target(40.0, 10.0 + tick * RATE)
+            motor.update()
+        target = 10.0 + 199 * RATE
+        self.assertAlmostEqual(plant.az, target, delta=1.01 * 2 * config.STEP_ANGLE)
+        self.assertAlmostEqual(motor.current_az, plant.az, places=9)
+
+    def test_manual_az_jog_uses_az_ratio(self):
+        plant, motor = self.make(az_ratio=2.0)
+        plant.drive = Mock()
+        motor.current_az = 100.0
+        motor.move_manual("AZ", True, 10)
+        self.assertAlmostEqual(motor.current_az, 100.0 + 20 * config.STEP_ANGLE)
+
+    def test_invalid_ratio_rejected(self):
+        with self.assertRaises(ValueError):
+            self.make(az_ratio=0.0)
