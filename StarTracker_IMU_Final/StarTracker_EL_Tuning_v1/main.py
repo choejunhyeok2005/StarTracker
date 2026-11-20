@@ -364,18 +364,21 @@ async def run_star_tracker() -> None:
             lcd_manager.clear()
             lcd_manager.write_text("Star Tracker System shutdown...", end="\n")
             time.sleep(5.0)
-        except Exception:
+        except (Exception, KeyboardInterrupt):
             pass
-        lcd_manager.clear()
-        lcd_manager.set_backlight(False)
-        lcd_manager.close()
+        try:
+            lcd_manager.clear()
+            lcd_manager.set_backlight(False)
+            lcd_manager.close()
+        except (Exception, KeyboardInterrupt):
+            pass
 
 
 def main() -> None:
 
     console_log_session = _early_console_log_session
 
-    if config.CONSOLE_LOG_ENABLED:
+    if config.CONSOLE_LOG_ENABLED and console_log_session is None:
         try:
             console_log_session = start_console_file_logging(
                 config.CONSOLE_LOG_DIRECTORY
@@ -400,11 +403,14 @@ def main() -> None:
             lcd_manager.clear()
             lcd_manager.write_text("Star Tracker System shutdown...", end="\n")
             time.sleep(5.0)
-        except Exception:
+        except (Exception, KeyboardInterrupt):
             pass
-        lcd_manager.clear()
-        lcd_manager.set_backlight(False)
-        lcd_manager.close()
+        try:
+            lcd_manager.clear()
+            lcd_manager.set_backlight(False)
+            lcd_manager.close()
+        except (Exception, KeyboardInterrupt):
+            pass
 
     finally:
         if console_log_session is not None:

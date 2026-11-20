@@ -15,3 +15,13 @@ data/images/*.wcs
 data/images/**/*.wcs
 data/logs/*.json
 data/logs/*.tmp
+# added 2026-11-20 for GitHub upload
+data/images/
+data/logs/
+data/diagnostics/
+data/tuning_demo/
+data/kalman_demo/
+*.dng
+.pytest_cache/
+.lgd-nfy0
+*.before_*

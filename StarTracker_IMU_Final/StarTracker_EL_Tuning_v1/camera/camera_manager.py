@@ -231,6 +231,15 @@ class CameraManager:
                 pass
             
             # Plate Solving 설정으로 변경 (streaming 상태와 무관하게 항상 실행)
+            # 노출을 configure 단계에서 넣어 첫 프레임부터 적용되게 하고,
+            # FrameDurationLimits가 없으면 기본 프레임 길이(~1/15 s)로 노출이 잘린다.
+            exposure_microseconds = int(config.PLATE_EXPOSURE_SECONDS * 1_000_000)
+            controls = {
+                "AeEnable": False,
+                "ExposureTime": exposure_microseconds,
+                "AnalogueGain": config.PLATE_ANALOGUE_GAIN,
+                "FrameDurationLimits": (exposure_microseconds, exposure_microseconds),
+            }
             plate_config = self.camera.create_still_configuration(
                 main={
                     "size": (
@@ -241,26 +250,13 @@ class CameraManager:
                 },
                 raw={},
                 buffer_count=2,
+                queue=False,
+                controls=controls,
             )
             self.camera.configure(plate_config)
             self.camera.start()
-            time.sleep(config.CAMERA_WARMUP_SECONDS)
 
-            self.camera.set_controls(
-                {
-                    "AeEnable": False,
-                    "ExposureTime": int(
-                        config.PLATE_EXPOSURE_SECONDS
-                        * 1_000_000
-                    ),
-                    "AnalogueGain": config.PLATE_ANALOGUE_GAIN,
-                }
-            )
-
-            # 설정 반영 대기
-            time.sleep(config.CAMERA_CONTROL_SETTLE_SECONDS)
-
-            self._capture_with_raw(filepath)
+            self._capture_with_raw(filepath, expected_exposure_us=exposure_microseconds)
 
         print(f"[Camera] Plate image saved: {filepath}")
 
@@ -401,7 +397,9 @@ class CameraManager:
             )
 
             # capture_file은 노출 및 파일 저장이 끝날 때까지 대기
-            self.last_exposure_metadata = self._capture_with_raw(filepath)
+            self.last_exposure_metadata = self._capture_with_raw(
+                filepath, expected_exposure_us=exposure_microseconds,
+            )
             metadata = self.last_exposure_metadata or {}
             # SensorTimestamp is exposure-end time on CLOCK_BOOTTIME.
             # Store the midpoint's age so the manager can use GNSS UTC.
@@ -454,22 +452,71 @@ class CameraManager:
     # Internal Validation
     # ==================================================
 
-    def _capture_with_raw(self, filepath: Path) -> dict:
+    def _capture_with_raw(
+        self,
+        filepath: Path,
+        expected_exposure_us: Optional[int] = None,
+    ) -> dict:
         """Save the processed image and sensor DNG from one completed frame.
 
-        The caller holds _camera_lock. Always release the request, including
-        when either save fails, so the camera buffers cannot remain pinned.
+        With expected_exposure_us, frames whose metadata ExposureTime differs
+        by more than CAMERA_EXPOSURE_RELATIVE_TOLERANCE (stale frames from the
+        previous settings) are discarded until a matching frame arrives or the
+        deadline passes. The caller holds _camera_lock. Always release every
+        request, including when a save fails, so camera buffers stay free.
         """
-        request = self.camera.capture_request()
-        try:
-            metadata = request.get_metadata()
-            request.save("main", str(filepath))
-            raw_path = filepath.with_suffix(".dng")
-            request.save_dng(str(raw_path))
-            print(f"[Camera] RAW image saved: {raw_path}")
-            return metadata
-        finally:
-            request.release()
+        deadline = None
+        tolerance_us = 0
+        if expected_exposure_us is not None:
+            tolerance_us = max(
+                1000,
+                expected_exposure_us * config.CAMERA_EXPOSURE_RELATIVE_TOLERANCE,
+            )
+            deadline = (
+                time.monotonic()
+                + 3 * expected_exposure_us / 1_000_000
+                + config.CAMERA_CAPTURE_TIMEOUT_MARGIN_SECONDS
+            )
+
+        discarded = 0
+        while True:
+            request = self.camera.capture_request()
+            try:
+                metadata = request.get_metadata()
+                actual_us = (
+                    metadata.get("ExposureTime")
+                    if isinstance(metadata, dict) else None
+                )
+                if (
+                    expected_exposure_us is not None
+                    and isinstance(actual_us, (int, float))
+                    and abs(actual_us - expected_exposure_us) > tolerance_us
+                ):
+                    discarded += 1
+                    print(
+                        "[Camera] Discarded frame: exposure "
+                        f"{actual_us / 1_000_000:.3f}s != requested "
+                        f"{expected_exposure_us / 1_000_000:.3f}s"
+                    )
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(
+                            "Camera did not deliver the requested exposure "
+                            f"({expected_exposure_us} us) after "
+                            f"{discarded} frames; last={actual_us} us"
+                        )
+                    continue
+                request.save("main", str(filepath))
+                raw_path = filepath.with_suffix(".dng")
+                request.save_dng(str(raw_path))
+                if isinstance(actual_us, (int, float)):
+                    print(
+                        f"[Camera] Verified exposure {actual_us / 1_000_000:.3f}s "
+                        f"(discarded {discarded})"
+                    )
+                print(f"[Camera] RAW image saved: {raw_path}")
+                return metadata
+            finally:
+                request.release()
 
     def _require_initialized(self) -> None:
 

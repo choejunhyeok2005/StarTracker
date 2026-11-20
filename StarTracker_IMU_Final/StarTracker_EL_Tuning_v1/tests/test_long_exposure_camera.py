@@ -74,6 +74,49 @@ class LongExposureCameraTests(unittest.TestCase):
             request.release.assert_called_once()
             self.assertEqual(camera.create_still_configuration.call_args.kwargs["raw"], {})
 
+    def test_plate_capture_applies_exposure_and_discards_stale_frames(self):
+        import config
+        camera = Mock()
+        expected = int(config.PLATE_EXPOSURE_SECONDS * 1_000_000)
+        exposures = [66_666, 66_666, expected - 200]
+        requests = []
+        def capture():
+            request = Mock()
+            request.get_metadata.return_value = {"ExposureTime": exposures[len(requests)]}
+            requests.append(request)
+            return request
+        camera.capture_request.side_effect = capture
+        manager = CameraManager()
+        manager.camera, manager.initialized = camera, True
+        with TemporaryDirectory() as directory:
+            path = str(Path(directory) / "plate.jpg")
+            manager.capture_plate(path)
+        self.assertEqual(len(requests), 3)
+        for request in requests:
+            request.release.assert_called_once()
+        requests[0].save.assert_not_called()
+        requests[1].save_dng.assert_not_called()
+        requests[2].save.assert_called_once_with("main", path)
+        settings = camera.create_still_configuration.call_args.kwargs
+        self.assertFalse(settings["queue"])
+        self.assertEqual(settings["controls"]["ExposureTime"], expected)
+        self.assertEqual(settings["controls"]["FrameDurationLimits"], (expected, expected))
+        self.assertFalse(settings["controls"]["AeEnable"])
+        camera.set_controls.assert_not_called()
+
+    def test_plate_capture_times_out_when_exposure_never_matches(self):
+        from unittest.mock import patch
+        camera = Mock()
+        camera.capture_request.return_value.get_metadata.return_value = {"ExposureTime": 66_666}
+        manager = CameraManager()
+        manager.camera, manager.initialized = camera, True
+        clock = iter(range(0, 10_000, 20))
+        with TemporaryDirectory() as directory, \
+                patch("camera.camera_manager.time.monotonic", side_effect=lambda: next(clock)):
+            with self.assertRaises(TimeoutError):
+                manager.capture_plate(str(Path(directory) / "plate.jpg"))
+        camera.capture_request.return_value.save.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

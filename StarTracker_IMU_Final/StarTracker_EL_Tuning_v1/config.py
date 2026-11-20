@@ -279,6 +279,12 @@ CAMERA_WARMUP_SECONDS = 2.0
 # 노출과 Gain 설정 후 적용 대기 시간
 CAMERA_CONTROL_SETTLE_SECONDS = 0.5
 
+# 요청한 노출과 실제 프레임 노출(metadata ExposureTime)의 허용 오차 비율.
+# 벗어난 프레임(이전 설정으로 찍힌 프레임)은 버리고 다시 받는다.
+CAMERA_EXPOSURE_RELATIVE_TOLERANCE = 0.01
+# 맞는 프레임을 기다리는 최대 시간 = 3 x 노출 + 이 여유값(초)
+CAMERA_CAPTURE_TIMEOUT_MARGIN_SECONDS = 30.0
+
 
 # =========================================================
 # Plate Solving Image Capture
@@ -359,7 +365,7 @@ PLATE_SCALE_HIGH = 30.0
 PLATE_DOWNSAMPLE = 4
 
 # solve-field 최대 실행 대기 시간
-PLATE_SOLVE_TIMEOUT = 20.0
+PLATE_SOLVE_TIMEOUT = 120.0
 
 
 # =========================================================
@@ -395,7 +401,7 @@ MAGNETIC_DECLINATION = 8.0  # 한국 자기편각 (도)
 COMPASS_STEP_PIN = 10  # STEP 신호 핀
 COMPASS_DIR_PIN = 9  # DIR 신호 핀
 COMPASS_EN_PIN = 25  # ENABLE 핀
-COMPASS_CALIBRATION_ENABLED = False
+COMPASS_CALIBRATION_ENABLED =False
 
 MOTOR_STEPS_PER_REV = 400
 MICROSTEP = 32
